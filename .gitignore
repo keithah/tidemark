@@ -1,4 +1,8 @@
 
+# ── tidemark ──
+/tidemark
+.bg-shell/
+
 # ── GSD baseline (auto-generated) ──
 .gsd
 .DS_Store
