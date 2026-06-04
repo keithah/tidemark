@@ -83,7 +83,7 @@ Each detected marker produces a JSON block followed by a colored summary line:
 Classifications:
 - **AD_START** (green) — ad break begins
 - **AD_END** (yellow) — ad break ends
-- **UNKNOWN** (gray) — metadata changed but no ad signal detected
+- **METADATA** (gray) — content metadata with no ad signal detected
 
 ## Flags
 
@@ -136,7 +136,7 @@ Tidemark auto-detects the stream type on startup:
 | SpliceInsert + OutOfNetworkIndicator=false | AD_END |
 | TimeSignal + segmentation type 0x22/0x30/0x34 | AD_START |
 | TimeSignal + segmentation type 0x23/0x31/0x35 | AD_END |
-| SpliceNull or unrecognized | UNKNOWN |
+| SpliceNull or unrecognized | METADATA |
 
 ### ICY Metadata
 
@@ -144,15 +144,15 @@ Tidemark auto-detects the stream type on startup:
 |-----------|---------------|
 | StreamTitle contains "ad", "spot", "promo", "commercial" (word boundary) | AD_START |
 | StreamTitle changes to non-ad content after ad | AD_END |
-| No match | UNKNOWN |
+| No match | METADATA |
 
 ### ID3 Tags
 
 | Condition | Classification |
 |-----------|---------------|
-| TXXX/TIT2 contains "ad", "spot", "promo", "commercial" | AD_START |
-| TXXX contains "ad_end", "content_start" | AD_END |
-| No match | UNKNOWN |
+| Any tag value contains "ad", "spot", "promo", "commercial" (word boundary) | AD_START |
+| Any tag value contains "ad_end", "content_start" | AD_END |
+| No match | METADATA |
 
 ## Supported HLS SCTE-35 Tags
 
@@ -163,11 +163,17 @@ Tidemark auto-detects the stream type on startup:
 
 ## Supported ID3 Frames
 
-- TIT2 (title)
-- TIT3 (subtitle)
-- TXXX (user-defined text)
-- PRIV (private)
-- GEOB (general encapsulated object)
+All structurally valid ID3v2.3 and v2.4 frames are emitted. Parsers with dedicated handling:
+
+- `T***` — all standard text frames (TIT2 title, TPE1 artist, TALB album, TDRC date, TCON genre, TRCK track, TLEN duration, TPUB publisher, etc.)
+- `TXXX` — user-defined text (description:value)
+- `COMM` — comment (lang:description:text)
+- `LINK` — linked information
+- `WXXX` — user-defined URL (description:url)
+- `W***` — standard URL frames
+- `PRIV` — private data (owner:hex)
+- `GEOB` — general encapsulated object
+- All other valid frame IDs — best-effort text decode
 
 ## Architecture
 
@@ -176,7 +182,7 @@ URL → Detector → [ICY Reader | HLS Poller | MPEGTS Decoder | UDP Reader]
                         ↓
                   chan *Marker
                         ↓
-                  Classifier (AD_START / AD_END / UNKNOWN)
+                  Classifier (AD_START / AD_END / METADATA)
                         ↓
                   Output Printer (JSON + colored summary)
 ```
