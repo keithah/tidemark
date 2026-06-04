@@ -18,7 +18,7 @@ func testMarker() *marker.Marker {
 		Type:           marker.MarkerICY,
 		Classification: marker.AdStart,
 		Source:         "icy_stream",
-		Fields:        map[string]string{"StreamTitle": "Ad Break"},
+		Fields:         map[string]string{"StreamTitle": "Ad Break"},
 		Timestamp:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 	}
 }
@@ -31,17 +31,15 @@ func TestPrintDefaultMode(t *testing.T) {
 		t.Fatalf("Print error: %v", err)
 	}
 	out := buf.String()
-	// Should contain JSON block
-	if !strings.Contains(out, "{") {
-		t.Error("default mode should contain JSON block")
+	if !strings.Contains(out, "ICY") {
+		t.Error("default mode should contain table row")
 	}
-	// Should contain summary line
-	if !strings.Contains(out, "▶") {
-		t.Error("default mode should contain summary line")
+	if strings.Contains(out, "▶") {
+		t.Error("default mode should not contain summary line")
 	}
 }
 
-func TestPrintDefaultModeWithColor(t *testing.T) {
+func TestPrintDefaultModeNoJSON(t *testing.T) {
 	var buf bytes.Buffer
 	m := testMarker()
 	err := Print(&buf, m, OutputConfig{Mode: ModeDefault, NoColor: false})
@@ -49,8 +47,8 @@ func TestPrintDefaultModeWithColor(t *testing.T) {
 		t.Fatalf("Print error: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "\033[") {
-		t.Error("colored mode should contain ANSI codes")
+	if strings.Contains(out, "{") {
+		t.Error("default mode should not contain JSON block")
 	}
 }
 
@@ -64,6 +62,20 @@ func TestPrintDefaultModeNoColor(t *testing.T) {
 	out := buf.String()
 	if strings.Contains(out, "\033[") {
 		t.Error("noColor mode should not contain ANSI codes")
+	}
+}
+
+func TestPrintHeaderDefaultMode(t *testing.T) {
+	var buf bytes.Buffer
+	err := PrintHeader(&buf, OutputConfig{Mode: ModeDefault})
+	if err != nil {
+		t.Fatalf("PrintHeader error: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"TIME", "TYPE", "CLASS", "SEG", "FRAME", "VALUE"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("header should contain %q", want)
+		}
 	}
 }
 
@@ -124,9 +136,9 @@ func TestPrintSCTE35Summary(t *testing.T) {
 		Type:           marker.MarkerSCTE35,
 		Classification: marker.AdStart,
 		Source:         "hls_manifest",
-		PTS:           38113.135,
-		Segment:       42,
-		Fields:        map[string]string{"CommandName": "Splice Insert", "BreakDuration": "90.023"},
+		PTS:            38113.135,
+		Segment:        42,
+		Fields:         map[string]string{"CommandName": "Splice Insert", "BreakDuration": "90.023"},
 		Timestamp:      time.Now(),
 	}
 	_ = Print(&buf, m, OutputConfig{Mode: ModeQuiet, NoColor: true})
@@ -145,13 +157,50 @@ func TestPrintID3Summary(t *testing.T) {
 		Type:           marker.MarkerID3,
 		Classification: marker.AdStart,
 		Source:         "hls_segment",
-		Tags:          map[string]string{"TIT2": "Ad Break"},
+		Tags:           map[string]string{"TIT2": "Ad Break"},
 		Timestamp:      time.Now(),
 	}
 	_ = Print(&buf, m, OutputConfig{Mode: ModeQuiet, NoColor: true})
 	out := buf.String()
 	if !strings.Contains(out, "ID3") {
 		t.Error("summary should contain ID3")
+	}
+}
+
+func TestPrintID3DefaultTableRows(t *testing.T) {
+	var buf bytes.Buffer
+	m := &marker.Marker{
+		Type:           marker.MarkerID3,
+		Classification: marker.Unknown,
+		Source:         "hls_segment",
+		Segment:        15552,
+		Tags: map[string]string{
+			"TPE1": "Kate Bush",
+			"TIT2": "Running Up That Hill",
+			"TALB": "Hounds Of Love",
+		},
+		Timestamp: time.Date(2026, 6, 4, 13, 44, 0, 0, time.UTC),
+	}
+	_ = Print(&buf, m, OutputConfig{Mode: ModeDefault, NoColor: true})
+	out := buf.String()
+	for _, want := range []string{
+		"2026-06-04T13:44:00",
+		"ID3",
+		"METADATA",
+		"15552",
+		"TIT2",
+		"Running Up That Hill",
+		"TPE1",
+		"Kate Bush",
+		"TALB",
+		"Hounds Of Love",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("default ID3 table should contain %q", want)
+		}
+	}
+	if strings.Contains(out, "{") || strings.Contains(out, "▶") {
+		t.Error("default ID3 table should not contain JSON or summary output")
 	}
 }
 
@@ -180,7 +229,7 @@ func TestPrintColorGray(t *testing.T) {
 	m.Classification = marker.Unknown
 	_ = Print(&buf, m, OutputConfig{Mode: ModeQuiet, NoColor: false})
 	if !strings.Contains(buf.String(), colorGray) {
-		t.Error("UNKNOWN should use gray color")
+		t.Error("METADATA should use gray color")
 	}
 }
 
@@ -254,7 +303,7 @@ func TestJSONOutReadbackFields(t *testing.T) {
 		Type:           marker.MarkerICY,
 		Classification: marker.AdStart,
 		Source:         "icy_stream",
-		Fields:        map[string]string{"StreamTitle": "Ad Break"},
+		Fields:         map[string]string{"StreamTitle": "Ad Break"},
 		Timestamp:      time.Now(),
 	}
 	_ = jout.Write(m)

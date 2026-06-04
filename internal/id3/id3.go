@@ -127,8 +127,16 @@ func parseFrame(id string, data []byte) *Tag {
 		return parsePRIVFrame(data)
 	case id == "GEOB":
 		return parseGEOBFrame(data)
+	case id == "LINK":
+		return parseLINKFrame(data)
+	case id == "WXXX":
+		return parseWXXXFrame(data)
+	case strings.HasPrefix(id, "W"):
+		return parseURLFrame(id, data)
+	case id == "COMM":
+		return parseCOMMFrame(data)
 	default:
-		return nil
+		return parseGenericFrame(id, data)
 	}
 }
 
@@ -197,6 +205,87 @@ func parseGEOBFrame(data []byte) *Tag {
 		ID:    "GEOB",
 		Value: fmt.Sprintf("%s:%s:%s:%s", mime, filename, description, hex.EncodeToString(objData)),
 	}
+}
+
+func parseLINKFrame(data []byte) *Tag {
+	if len(data) == 0 {
+		return nil
+	}
+
+	// ID3 LINK frames start with a 4-byte linked frame ID. In the Stingray
+	// timed metadata this is followed by a null separator and the useful ID.
+	if len(data) >= 4 && isValidFrameID(string(data[:4])) {
+		data = data[4:]
+	}
+	data = bytes.Trim(data, "\x00")
+	if len(data) == 0 {
+		return nil
+	}
+	return &Tag{ID: "LINK", Value: string(data)}
+}
+
+func parseWXXXFrame(data []byte) *Tag {
+	if len(data) < 2 {
+		return nil
+	}
+	encoding := data[0]
+	desc, value := splitOnNull(data[1:], encoding)
+	descText := decodeText(desc, encoding)
+	valueText := strings.Trim(string(bytes.Trim(value, "\x00")), "\x00")
+	if valueText == "" {
+		return nil
+	}
+	if descText != "" {
+		return &Tag{ID: "WXXX", Value: descText + ":" + valueText}
+	}
+	return &Tag{ID: "WXXX", Value: valueText}
+}
+
+func parseURLFrame(id string, data []byte) *Tag {
+	value := strings.TrimSpace(string(bytes.Trim(data, "\x00")))
+	if value == "" {
+		return nil
+	}
+	return &Tag{ID: id, Value: value}
+}
+
+func parseCOMMFrame(data []byte) *Tag {
+	if len(data) < 5 {
+		return nil
+	}
+	encoding := data[0]
+	lang := string(data[1:4])
+	desc, text := splitOnNull(data[4:], encoding)
+	descText := decodeText(desc, encoding)
+	valueText := decodeText(text, encoding)
+	if valueText == "" {
+		return nil
+	}
+	switch {
+	case descText != "" && lang != "":
+		return &Tag{ID: "COMM", Value: lang + ":" + descText + ":" + valueText}
+	case lang != "":
+		return &Tag{ID: "COMM", Value: lang + ":" + valueText}
+	default:
+		return &Tag{ID: "COMM", Value: valueText}
+	}
+}
+
+func parseGenericFrame(id string, data []byte) *Tag {
+	if len(data) == 0 {
+		return nil
+	}
+	if data[0] <= 0x03 {
+		if text := strings.TrimSpace(decodeText(data[1:], data[0])); text != "" {
+			return &Tag{ID: id, Value: text}
+		}
+	}
+
+	value := strings.TrimSpace(strings.Join(strings.Fields(string(bytes.Trim(data, "\x00"))), " "))
+	if value == "" {
+		value = hex.EncodeToString(data)
+	}
+	return &Tag{ID: id, Value: value}
 }
 
 func decodeText(data []byte, encoding byte) string {
@@ -308,9 +397,15 @@ func isValidFrameID(id string) bool {
 // of 188), it walks the TS packets, reassembles PES payloads per PID, strips
 // PES headers, and calls Parse on each ID3 blob found. Otherwise it falls back
 // to Parse directly — so raw AAC segments and non-TS input work unchanged.
-func ParseFromMPEGTS(data []byte) ([]Tag, error) {
+//
+// Each inner slice represents one distinct timed ID3 event (one ID3 blob/PES).
+func ParseFromMPEGTS(data []byte) ([][]Tag, error) {
 	if len(data) < 188 || data[0] != 0x47 || len(data)%188 != 0 {
-		return Parse(data)
+		tags, err := Parse(data)
+		if len(tags) == 0 {
+			return nil, err
+		}
+		return [][]Tag{tags}, err
 	}
 
 	bufs := make(map[uint16][]byte)
@@ -378,13 +473,15 @@ func ParseFromMPEGTS(data []byte) ([]Tag, error) {
 		collect(buf)
 	}
 
-	var allTags []Tag
+	var allGroups [][]Tag
 	for _, blob := range id3Blobs {
 		tags, err := Parse(blob)
 		if err != nil {
 			_ = err // non-fatal: collect whatever frames were parsed
 		}
-		allTags = append(allTags, tags...)
+		if len(tags) > 0 {
+			allGroups = append(allGroups, tags)
+		}
 	}
-	return allTags, nil
+	return allGroups, nil
 }

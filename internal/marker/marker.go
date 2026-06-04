@@ -73,7 +73,7 @@ func (c Classification) String() string {
 	case AdEnd:
 		return "AD_END"
 	default:
-		return "UNKNOWN"
+		return "METADATA"
 	}
 }
 

@@ -205,10 +205,17 @@ func runICY(ctx context.Context, url string, metaInt int, cls *classifier.Classi
 	}()
 
 	markerCount := 0
+	headerPrinted := false
 	for m := range ch {
 		m.Classification = cls.Classify(m)
 		if shouldFilter(m, cfg.Filter) {
 			continue
+		}
+		if !headerPrinted {
+			if err := output.PrintHeader(os.Stdout, ocfg); err != nil {
+				fmt.Fprintf(os.Stderr, "[tidemark] output error: %s\n", err)
+			}
+			headerPrinted = true
 		}
 		markerCount++
 		if err := output.Print(os.Stdout, m, ocfg); err != nil {
@@ -244,9 +251,16 @@ func runHLS(ctx context.Context, url string, cls *classifier.Classifier, ch chan
 	}()
 
 	markerCount := 0
+	headerPrinted := false
 	for m := range ch {
 		if shouldFilter(m, cfg.Filter) {
 			continue
+		}
+		if !headerPrinted {
+			if err := output.PrintHeader(os.Stdout, ocfg); err != nil {
+				fmt.Fprintf(os.Stderr, "[tidemark] output error: %s\n", err)
+			}
+			headerPrinted = true
 		}
 		markerCount++
 		if err := output.Print(os.Stdout, m, ocfg); err != nil {
@@ -288,10 +302,17 @@ func runMPEGTS(ctx context.Context, url string, cls *classifier.Classifier, ch c
 	}()
 
 	markerCount := 0
+	headerPrinted := false
 	for m := range ch {
 		m.Classification = cls.Classify(m)
 		if shouldFilter(m, cfg.Filter) {
 			continue
+		}
+		if !headerPrinted {
+			if err := output.PrintHeader(os.Stdout, ocfg); err != nil {
+				fmt.Fprintf(os.Stderr, "[tidemark] output error: %s\n", err)
+			}
+			headerPrinted = true
 		}
 		markerCount++
 		if err := output.Print(os.Stdout, m, ocfg); err != nil {
@@ -327,10 +348,17 @@ func runUDP(ctx context.Context, url string, cls *classifier.Classifier, ch chan
 	}()
 
 	markerCount := 0
+	headerPrinted := false
 	for m := range ch {
 		m.Classification = cls.Classify(m)
 		if shouldFilter(m, cfg.Filter) {
 			continue
+		}
+		if !headerPrinted {
+			if err := output.PrintHeader(os.Stdout, ocfg); err != nil {
+				fmt.Fprintf(os.Stderr, "[tidemark] output error: %s\n", err)
+			}
+			headerPrinted = true
 		}
 		markerCount++
 		if err := output.Print(os.Stdout, m, ocfg); err != nil {

@@ -22,7 +22,7 @@ import (
 type Poller struct {
 	url           string
 	classify      *classifier.Classifier
-	seen          map[int]bool   // seen segment sequence numbers
+	seen          map[int]bool    // seen segment sequence numbers
 	seenSegments  map[string]bool // seen segment URIs (for download dedup)
 	mpegtsDecoder *mpegts.Decoder
 }
@@ -171,8 +171,8 @@ func (p *Poller) emitTag(tag *TagResult, seg int, ch chan<- *marker.Marker) {
 			Type:           marker.MarkerSCTE35,
 			Classification: tag.DirectType,
 			Source:         "hls_manifest",
-			Tag:           tag.Tag,
-			Segment:       seg,
+			Tag:            tag.Tag,
+			Segment:        seg,
 			Timestamp:      time.Now(),
 		}
 		ch <- m
@@ -221,14 +221,18 @@ func (p *Poller) downloadAndDecode(ctx context.Context, segURL string, seg int, 
 		ch <- m
 	}
 
-	// ID3 extraction
-	tags, _ := id3.ParseFromMPEGTS(data)
-	for _, tag := range tags {
+	// ID3 extraction — one marker per timed ID3 event (one per ID3 blob/PES).
+	groups, _ := id3.ParseFromMPEGTS(data)
+	for _, tags := range groups {
+		tagMap := make(map[string]string, len(tags))
+		for _, tag := range tags {
+			tagMap[tag.ID] = tag.Value
+		}
 		m := &marker.Marker{
 			Type:      marker.MarkerID3,
 			Source:    "hls_segment",
-			Segment:  seg,
-			Tags:     map[string]string{tag.ID: tag.Value},
+			Segment:   seg,
+			Tags:      tagMap,
 			Timestamp: time.Now(),
 		}
 		m.Classification = p.classify.Classify(m)

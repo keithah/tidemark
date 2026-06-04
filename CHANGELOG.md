@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-04
+
+### Added
+
+- **Extended ID3v2 frame support** — LINK, WXXX, W* (URL), COMM, and all other valid frames are now emitted; previously any frame ID not in a hardcoded list was silently dropped
+- **Generic frame fallback** — unknown but structurally valid ID3 frames are parsed and emitted using a best-effort text decoder, so no metadata is lost
+
+### Fixed
+
+- **Per-event ID3 markers** — a segment containing multiple timed ID3 packets (multiple PES streams) now emits one marker per event; previously all frames were collapsed into a single map, losing duplicate frame IDs and making classification order-dependent
+- **METADATA classification label** — markers that carry content metadata but no ad signal now show `METADATA` instead of `UNKNOWN`
+
+[0.3.0]: https://github.com/keithah/tidemark-go/releases/tag/v0.3.0
+
 ## [0.2.1] - 2026-04-29
 
 ### Fixed

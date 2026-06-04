@@ -186,6 +186,42 @@ func TestParseGEOB(t *testing.T) {
 	}
 }
 
+func TestParseLINK(t *testing.T) {
+	frame := buildFrame("LINK", 4, []byte{'W', 'X', 'X', 'X', 0x00, '4', '3', '0', '3', '3', '1', '1'})
+	tag := buildTag(4, frame)
+	tags, _ := Parse(tag)
+	if len(tags) != 1 {
+		t.Fatalf("expected 1 tag, got %d", len(tags))
+	}
+	if tags[0].ID != "LINK" || tags[0].Value != "4303311" {
+		t.Errorf("got {%s, %q}, want {LINK, 4303311}", tags[0].ID, tags[0].Value)
+	}
+}
+
+func TestParseWXXX(t *testing.T) {
+	frame := buildFrame("WXXX", 4, []byte{0x03, 'i', 'd', 0x00, 'h', 't', 't', 'p', 's', ':', '/', '/', 'e', 'x'})
+	tag := buildTag(4, frame)
+	tags, _ := Parse(tag)
+	if len(tags) != 1 {
+		t.Fatalf("expected 1 tag, got %d", len(tags))
+	}
+	if tags[0].ID != "WXXX" || tags[0].Value != "id:https://ex" {
+		t.Errorf("got {%s, %q}, want {WXXX, id:https://ex}", tags[0].ID, tags[0].Value)
+	}
+}
+
+func TestParseUnknownMetadataFrame(t *testing.T) {
+	frame := buildFrame("XABC", 4, []byte{0x03, 'c', 'u', 's', 't', 'o', 'm'})
+	tag := buildTag(4, frame)
+	tags, _ := Parse(tag)
+	if len(tags) != 1 {
+		t.Fatalf("expected 1 tag, got %d", len(tags))
+	}
+	if tags[0].ID != "XABC" || tags[0].Value != "custom" {
+		t.Errorf("got {%s, %q}, want {XABC, custom}", tags[0].ID, tags[0].Value)
+	}
+}
+
 func TestParseUTF8(t *testing.T) {
 	frame := buildFrame("TIT2", 4, []byte{0x03, 0xC3, 0xBC, 0x62, 0x65, 0x72}) // "über" in UTF-8
 	tag := buildTag(4, frame)
@@ -381,12 +417,12 @@ func TestParseFromMPEGTSFallback(t *testing.T) {
 	frame := buildFrame("TIT2", 3, []byte{0x00, 'X'})
 	data := buildTag(3, frame)
 	// data is ~20 bytes; not divisible by 188, not a sync byte at [0]
-	tags, err := ParseFromMPEGTS(data)
+	groups, err := ParseFromMPEGTS(data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(tags) != 1 || tags[0].ID != "TIT2" || tags[0].Value != "X" {
-		t.Errorf("fallback: got %v, want [{TIT2 X}]", tags)
+	if len(groups) != 1 || len(groups[0]) != 1 || groups[0][0].ID != "TIT2" || groups[0][0].Value != "X" {
+		t.Errorf("fallback: got %v, want [[{TIT2 X}]]", groups)
 	}
 }
 
@@ -400,12 +436,12 @@ func TestParseFromMPEGTSFallbackWrongSyncByte(t *testing.T) {
 	data := make([]byte, 188)
 	copy(data, id3tag)
 	// data[0] == 'I' (0x49), not 0x47; len(data) == 188 (divisible by 188)
-	tags, err := ParseFromMPEGTS(data)
+	groups, err := ParseFromMPEGTS(data)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(tags) != 1 || tags[0].ID != "TIT2" || tags[0].Value != "Y" {
-		t.Errorf("fallback (wrong sync byte): got %v, want [{TIT2 Y}]", tags)
+	if len(groups) != 1 || len(groups[0]) != 1 || groups[0][0].ID != "TIT2" || groups[0][0].Value != "Y" {
+		t.Errorf("fallback (wrong sync byte): got %v, want [[{TIT2 Y}]]", groups)
 	}
 }
 
@@ -420,12 +456,15 @@ func TestParseFromMPEGTSSinglePacket(t *testing.T) {
 		t.Fatalf("test setup: expected 1 TS packet (188 bytes), got %d", len(tsData))
 	}
 
-	tags, err := ParseFromMPEGTS(tsData)
+	groups, err := ParseFromMPEGTS(tsData)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(groups) == 0 {
+		t.Fatal("expected 1 group, got 0")
+	}
 	tagMap := make(map[string]string)
-	for _, tag := range tags {
+	for _, tag := range groups[0] {
 		tagMap[tag.ID] = tag.Value
 	}
 	if tagMap["TIT2"] != "Title" {
@@ -452,12 +491,15 @@ func TestParseFromMPEGTSMultiPacket(t *testing.T) {
 		t.Fatalf("test setup: expected multi-packet data, got %d bytes", len(tsData))
 	}
 
-	tags, err := ParseFromMPEGTS(tsData)
+	groups, err := ParseFromMPEGTS(tsData)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if len(groups) == 0 {
+		t.Fatal("expected 1 group, got 0")
+	}
 	tagMap := make(map[string]string)
-	for _, tag := range tags {
+	for _, tag := range groups[0] {
 		tagMap[tag.ID] = tag.Value
 	}
 	if tagMap["TIT2"] != longTitle {
@@ -480,12 +522,12 @@ func TestParseFromMPEGTSMultiplePIDs(t *testing.T) {
 
 	combined := append(audioData, id3TS...)
 
-	tags, err := ParseFromMPEGTS(combined)
+	groups, err := ParseFromMPEGTS(combined)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(tags) != 1 || tags[0].ID != "TIT2" || tags[0].Value != "X" {
-		t.Errorf("got %v, want [{TIT2 X}]", tags)
+	if len(groups) != 1 || len(groups[0]) != 1 || groups[0][0].ID != "TIT2" || groups[0][0].Value != "X" {
+		t.Errorf("got %v, want [[{TIT2 X}]]", groups)
 	}
 }
 
@@ -493,11 +535,11 @@ func TestParseFromMPEGTSNonID3PES(t *testing.T) {
 	// TS segment whose PES payload does not contain ID3 magic.
 	// Expect zero tags and no error.
 	tsData := buildMPEGTSSegment(0x0100, []byte("raw audio payload no metadata"))
-	tags, err := ParseFromMPEGTS(tsData)
+	groups, err := ParseFromMPEGTS(tsData)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(tags) != 0 {
-		t.Errorf("expected 0 tags from non-ID3 PES, got %d: %v", len(tags), tags)
+	if len(groups) != 0 {
+		t.Errorf("expected 0 groups from non-ID3 PES, got %d: %v", len(groups), groups)
 	}
 }

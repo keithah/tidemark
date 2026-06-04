@@ -33,7 +33,7 @@ func TestClassifyICYUnknown(t *testing.T) {
 	m := &marker.Marker{Type: marker.MarkerICY, Fields: map[string]string{"StreamTitle": "My Favorite Song"}}
 	got := c.Classify(m)
 	if got != marker.Unknown {
-		t.Errorf("expected UNKNOWN, got %s", got)
+		t.Errorf("expected METADATA, got %s", got)
 	}
 }
 
@@ -80,7 +80,7 @@ func TestClassifyICYWordBoundary(t *testing.T) {
 	m := &marker.Marker{Type: marker.MarkerICY, Fields: map[string]string{"StreamTitle": "The Administrator"}}
 	got := c.Classify(m)
 	if got != marker.Unknown {
-		t.Errorf("expected UNKNOWN for word boundary, got %s", got)
+		t.Errorf("expected METADATA for word boundary, got %s", got)
 	}
 }
 
@@ -154,7 +154,7 @@ func TestClassifySCTE35SpliceNull(t *testing.T) {
 	c := New()
 	got := c.Classify(m)
 	if got != marker.Unknown {
-		t.Errorf("expected UNKNOWN for SpliceNull, got %s", got)
+		t.Errorf("expected METADATA for SpliceNull, got %s", got)
 	}
 }
 
@@ -163,7 +163,7 @@ func TestClassifySCTE35NilFields(t *testing.T) {
 	c := New()
 	got := c.Classify(m)
 	if got != marker.Unknown {
-		t.Errorf("expected UNKNOWN for nil fields, got %s", got)
+		t.Errorf("expected METADATA for nil fields, got %s", got)
 	}
 }
 
@@ -216,7 +216,7 @@ func TestClassifyID3Unknown(t *testing.T) {
 	c := New()
 	got := c.Classify(m)
 	if got != marker.Unknown {
-		t.Errorf("expected UNKNOWN, got %s", got)
+		t.Errorf("expected METADATA, got %s", got)
 	}
 }
 
