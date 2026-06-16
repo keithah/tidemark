@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-06-16
+
+### Fixed
+
+- Improved HLS polling reliability with conditional manifest requests, bounded segment tracking, ordered segment marker emission, faster polling tests, and fail-fast handling for permanent manifest errors.
+- Added streaming idle-read timeouts and stronger cancellation cleanup for ICY, MPEGTS, UDP, and HLS segment readers.
+- Report MPEGTS decoder failures instead of silently treating recovered decoder panics as empty marker results.
+- Hardened ID3 scanning/parsing for incremental streams, oversized tags, lower allocation parsing, and safe terminal/table output.
+- Reduced hot-path allocations in marker classification, JSON output, enum marshaling, HLS attribute parsing, and ID3 segment marker emission.
+- Reworked output flushing and JSON file closing so write, flush, sync, and close errors are surfaced correctly.
+- Restored cached default test paths in `make test`, release CI, and the release workflow while keeping `make test-fresh` for explicit uncached runs.
+
 ## [0.3.0] - 2026-06-04
 
 ### Added
@@ -17,6 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Per-event ID3 markers** — a segment containing multiple timed ID3 packets (multiple PES streams) now emits one marker per event; previously all frames were collapsed into a single map, losing duplicate frame IDs and making classification order-dependent
 - **METADATA classification label** — markers that carry content metadata but no ad signal now show `METADATA` instead of `UNKNOWN`
 
+[0.3.1]: https://github.com/keithah/tidemark-go/releases/tag/v0.3.1
 [0.3.0]: https://github.com/keithah/tidemark-go/releases/tag/v0.3.0
 
 ## [0.2.1] - 2026-04-29

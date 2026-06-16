@@ -167,6 +167,28 @@ func TestPrintID3Summary(t *testing.T) {
 	}
 }
 
+func TestPrintID3SummaryRemovesControlCharacters(t *testing.T) {
+	var buf bytes.Buffer
+	m := &marker.Marker{
+		Type:           marker.MarkerID3,
+		Classification: marker.AdStart,
+		Source:         "hls_segment",
+		Tags:           map[string]string{"TIT2": "Ad\x1b[31m Break\x00"},
+		Timestamp:      time.Now(),
+	}
+	if err := Print(&buf, m, OutputConfig{Mode: ModeQuiet, NoColor: true}); err != nil {
+		t.Fatalf("Print: %v", err)
+	}
+
+	out := buf.String()
+	if strings.Contains(out, "\x1b") || strings.Contains(out, "\x00") {
+		t.Fatalf("summary contains control characters: %q", out)
+	}
+	if !strings.Contains(out, "TIT2=Ad[31m Break") {
+		t.Fatalf("summary = %q, want sanitized ID3 text", out)
+	}
+}
+
 func TestPrintID3DefaultTableRows(t *testing.T) {
 	var buf bytes.Buffer
 	m := &marker.Marker{

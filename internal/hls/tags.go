@@ -6,6 +6,8 @@ import (
 	"github.com/keithah/tidemark/internal/marker"
 )
 
+const maxAttributePrealloc = 16
+
 // TagResult holds a parsed SCTE-35 tag result.
 type TagResult struct {
 	Payload    string // base64 or hex SCTE-35 payload
@@ -91,8 +93,12 @@ func parseCueInTag(line string) *TagResult {
 
 // parseAttributes parses HLS key=value attributes, handling quoted values with commas.
 func parseAttributes(s string) map[string]string {
-	attrs := make(map[string]string)
 	s = strings.TrimSpace(s)
+	capHint := strings.Count(s, ",") + 1
+	if capHint > maxAttributePrealloc {
+		capHint = maxAttributePrealloc
+	}
+	attrs := make(map[string]string, capHint)
 
 	var key, value strings.Builder
 	inQuote := false

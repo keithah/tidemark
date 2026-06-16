@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/keithah/tidemark/internal/httpclient"
 	"github.com/keithah/tidemark/internal/marker"
 )
 
@@ -31,19 +33,23 @@ func Detect(ctx context.Context, url string) (*marker.DetectResult, error) {
 		return &marker.DetectResult{Type: marker.StreamHLS}, nil
 	}
 
-	// HTTP probe
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Icy-MetaData", "1")
-
-	resp, err := client.Do(req)
+	client := httpclient.NewTimed(10 * time.Second)
+	resp, err := probeHTTP(ctx, client, url, http.MethodHead)
 	if err != nil {
 		return nil, fmt.Errorf("probe URL: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
+		httpclient.DrainAndClose(resp.Body)
+		resp, err = probeHTTP(ctx, client, url, http.MethodGet)
+		if err != nil {
+			return nil, fmt.Errorf("probe URL: %w", err)
+		}
+	}
+	defer httpclient.DrainAndClose(resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("probe URL: status %d", resp.StatusCode)
+	}
 
 	// Check for ICY metaint header
 	icyStr := resp.Header.Get("icy-metaint")
@@ -69,10 +75,19 @@ func Detect(ctx context.Context, url string) (*marker.DetectResult, error) {
 	return &marker.DetectResult{Type: marker.StreamUnknown}, nil
 }
 
+func probeHTTP(ctx context.Context, client *http.Client, url, method string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Icy-MetaData", "1")
+	return client.Do(req)
+}
+
 // HTTPGet performs a simple HTTP GET request with context support.
 // Used by callers that need a raw response body (e.g., MPEGTS stream reading).
 func HTTPGet(ctx context.Context, url string) (*http.Response, error) {
-	client := &http.Client{}
+	client := httpclient.NewStreaming()
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -80,6 +95,10 @@ func HTTPGet(ctx context.Context, url string) (*http.Response, error) {
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("GET %s: %w", url, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		httpclient.DrainAndClose(resp.Body)
+		return nil, fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
 	}
 	return resp, nil
 }

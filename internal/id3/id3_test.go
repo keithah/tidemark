@@ -1,6 +1,7 @@
 package id3
 
 import (
+	"bytes"
 	"encoding/binary"
 	"strings"
 	"testing"
@@ -305,6 +306,56 @@ func TestParseMultipleTags(t *testing.T) {
 	tags, _ := Parse(data)
 	if len(tags) != 2 {
 		t.Fatalf("expected 2 tags from 2 ID3 blocks, got %d", len(tags))
+	}
+}
+
+func TestScannerParsesTagAcrossChunkBoundaries(t *testing.T) {
+	frame := buildFrame("TIT2", 3, []byte{0x00, 'S', 't', 'r', 'e', 'a', 'm'})
+	tag := buildTag(3, frame)
+	data := append([]byte("prefix"), tag...)
+	data = append(data, []byte("suffix")...)
+
+	scanner := NewScanner(1024)
+	var tags []Tag
+	for _, chunkSize := range []int{3, 2, 5, 1, 4, 8, 64} {
+		if len(data) == 0 {
+			break
+		}
+		if chunkSize > len(data) {
+			chunkSize = len(data)
+		}
+		got, err := scanner.Write(data[:chunkSize])
+		if err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		tags = append(tags, got...)
+		data = data[chunkSize:]
+	}
+	got, err := scanner.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	tags = append(tags, got...)
+
+	if len(tags) != 1 {
+		t.Fatalf("tags = %d, want 1", len(tags))
+	}
+	if tags[0].ID != "TIT2" || tags[0].Value != "Stream" {
+		t.Fatalf("tag = {%s %q}, want {TIT2 Stream}", tags[0].ID, tags[0].Value)
+	}
+}
+
+func TestScannerRejectsOversizedTag(t *testing.T) {
+	frame := buildFrame("TIT2", 3, bytes.Repeat([]byte{'x'}, 32))
+	tag := buildTag(3, frame)
+
+	scanner := NewScanner(8)
+	_, err := scanner.Write(tag)
+	if err == nil {
+		t.Fatal("expected oversized tag error")
+	}
+	if !strings.Contains(err.Error(), "ID3 tag too large") {
+		t.Fatalf("error = %q, want ID3 tag too large", err.Error())
 	}
 }
 

@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +43,61 @@ func TestParseFlags_FilterValid(t *testing.T) {
 	}
 }
 
+func TestParseFlags_VersionIsPureConfig(t *testing.T) {
+	cfg, url, _, cancel, err := parseFlags([]string{"--version"})
+	defer cancel()
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if !cfg.Version {
+		t.Fatal("Version = false, want true")
+	}
+	if url != "" {
+		t.Fatalf("url = %q, want empty", url)
+	}
+	if cfg.NoColor {
+		t.Fatal("NoColor should not be mutated by --version")
+	}
+}
+
+func TestRunMarkerSourcePropagatesProducerError(t *testing.T) {
+	wantErr := errors.New("producer failed")
+	cfg := &Config{}
+	err := runMarkerSource(context.Background(), cfg, func(ctx context.Context, ch chan<- *marker.Marker) error {
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("runMarkerSource error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestRunMarkerSourceReturnsOutputError(t *testing.T) {
+	oldStdout := os.Stdout
+	_, brokenStdout, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	brokenStdout.Close()
+	os.Stdout = brokenStdout
+	defer func() { os.Stdout = oldStdout }()
+
+	cfg := &Config{}
+	err = runMarkerSource(context.Background(), cfg, func(ctx context.Context, ch chan<- *marker.Marker) error {
+		ch <- &marker.Marker{
+			Type:   marker.MarkerICY,
+			Source: "test",
+			Fields: map[string]string{"StreamTitle": "Song"},
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected output error")
+	}
+	if !strings.Contains(err.Error(), "output marker") {
+		t.Fatalf("error = %q, want output marker", err.Error())
+	}
+}
+
 func TestParseFlags_TimeoutSetsValue(t *testing.T) {
 	cfg, _, _, cancel, err := parseFlags([]string{"--timeout", "30", "http://example.com"})
 	defer cancel()
@@ -71,11 +129,17 @@ func simulateMarkerLoop(markers []*marker.Marker, filter string, noColor bool) (
 	cls := classifier.New()
 	var stderr bytes.Buffer
 	ocfg := output.OutputConfig{Mode: output.ModeQuiet, NoColor: noColor}
+	cfg := &Config{NoColor: noColor}
+	if filter != "" {
+		cfg.Filter = filter
+		cfg.FilterType = parseMarkerType(filter)
+		cfg.HasFilter = true
+	}
 
 	markerCount := 0
 	for _, m := range markers {
 		m.Classification = cls.Classify(m)
-		if shouldFilter(m, filter) {
+		if shouldFilter(m, cfg) {
 			continue
 		}
 		markerCount++
@@ -85,16 +149,11 @@ func simulateMarkerLoop(markers []*marker.Marker, filter string, noColor bool) (
 	// Write shutdown message
 	(&stderr).WriteString("\n[tidemark] stopped. ")
 	(&stderr).WriteString(strings.Replace(
-		strings.Replace("[tidemark] stopped. N markers detected.\n", "N", itoa(markerCount), 1),
+		strings.Replace("[tidemark] stopped. N markers detected.\n", "N", strconv.Itoa(markerCount), 1),
 		"[tidemark] stopped. ", "", 1,
 	))
 
 	return markerCount, stderr.String()
-}
-
-func itoa(i int) string {
-	return strings.TrimRight(strings.TrimLeft(
-		strings.Replace("     ", " ", string(rune('0'+i)), 1), " "), " ")
 }
 
 func TestShutdownMessage_NoFilter(t *testing.T) {
@@ -152,7 +211,7 @@ func TestShutdownMessage_WithJSONOut(t *testing.T) {
 		Type:           marker.MarkerICY,
 		Classification: marker.AdStart,
 		Source:         "icy_stream",
-		Fields:        map[string]string{"StreamTitle": "Ad"},
+		Fields:         map[string]string{"StreamTitle": "Ad"},
 		Timestamp:      time.Now(),
 	}
 	_ = jout.Write(m)
@@ -179,7 +238,13 @@ func TestShouldFilter(t *testing.T) {
 	}
 	for _, tt := range tests {
 		m := &marker.Marker{Type: tt.markerType}
-		got := shouldFilter(m, tt.filter)
+		cfg := &Config{}
+		if tt.filter != "" {
+			cfg.Filter = tt.filter
+			cfg.FilterType = parseMarkerType(tt.filter)
+			cfg.HasFilter = true
+		}
+		got := shouldFilter(m, cfg)
 		if got != tt.want {
 			t.Errorf("shouldFilter(%v, %q) = %v, want %v", tt.markerType, tt.filter, got, tt.want)
 		}
@@ -216,7 +281,7 @@ func TestPrintBanner_JSONMode(t *testing.T) {
 
 func TestPrintBanner_QuietMode(t *testing.T) {
 	var buf bytes.Buffer
-	cfg := &Config{Quiet: true, Filter: "scte35"}
+	cfg := &Config{Quiet: true, Filter: "scte35", FilterType: marker.MarkerSCTE35, HasFilter: true}
 	printBanner(&buf, "http://example.com", marker.StreamHLS, cfg)
 	if !strings.Contains(buf.String(), "output: quiet") {
 		t.Error("banner should show output: quiet")

@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/keithah/tidemark/internal/marker"
 )
@@ -54,12 +56,11 @@ func PrintHeader(w io.Writer, cfg OutputConfig) error {
 }
 
 func printJSON(w io.Writer, m *marker.Marker) error {
-	data, err := json.Marshal(m)
-	if err != nil {
+	enc := json.NewEncoder(w)
+	if err := enc.Encode(m); err != nil {
 		return fmt.Errorf("marshal: %w", err)
 	}
-	_, err = fmt.Fprintf(w, "%s\n", data)
-	return err
+	return nil
 }
 
 func printSummary(w io.Writer, m *marker.Marker, noColor bool) error {
@@ -98,8 +99,8 @@ func printTableRows(w io.Writer, m *marker.Marker) error {
 			m.Type.String(),
 			m.Classification.String(),
 			seg,
-			row.frame,
-			row.value,
+			cleanSummaryText(row.frame),
+			cleanSummaryText(row.value),
 		); err != nil {
 			return err
 		}
@@ -179,16 +180,16 @@ func summaryDetail(m *marker.Marker) string {
 	switch m.Type {
 	case marker.MarkerICY:
 		if title, ok := m.Fields["StreamTitle"]; ok {
-			return "StreamTitle=" + title
+			return "StreamTitle=" + cleanSummaryText(title)
 		}
 		return ""
 	case marker.MarkerSCTE35:
-		var parts []string
+		parts := make([]string, 0, 4)
 		if name, ok := m.Fields["CommandName"]; ok {
-			parts = append(parts, name)
+			parts = append(parts, cleanSummaryText(name))
 		}
 		if dur, ok := m.Fields["BreakDuration"]; ok {
-			parts = append(parts, "break="+dur+"s")
+			parts = append(parts, "break="+cleanSummaryText(dur)+"s")
 		}
 		if pts := m.PTS; pts > 0 {
 			parts = append(parts, fmt.Sprintf("pts=%.3f", pts))
@@ -198,12 +199,30 @@ func summaryDetail(m *marker.Marker) string {
 		}
 		return strings.Join(parts, "  ")
 	case marker.MarkerID3:
-		var parts []string
+		parts := make([]string, 0, len(m.Tags))
 		for k, v := range m.Tags {
-			parts = append(parts, k+"="+v)
+			parts = append(parts, cleanSummaryText(k)+"="+cleanSummaryText(v))
 		}
 		return strings.Join(parts, "  ")
 	default:
 		return ""
 	}
+}
+
+func cleanSummaryText(text string) string {
+	if text == "" {
+		return ""
+	}
+	if !utf8.ValidString(text) {
+		return "[binary data]"
+	}
+
+	var b strings.Builder
+	b.Grow(len(text))
+	for _, r := range text {
+		if unicode.IsPrint(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

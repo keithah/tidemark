@@ -3,11 +3,12 @@ package icy
 import (
 	"bytes"
 	"context"
+	"github.com/keithah/tidemark/internal/marker"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
-	"github.com/keithah/tidemark/internal/marker"
 )
 
 // serveICY creates an httptest server that speaks the ICY protocol.
@@ -45,7 +46,7 @@ func serveICY(metaInt int, titles []string) *httptest.Server {
 	}))
 }
 
-// buildICYStream builds raw ICY protocol bytes for testing ReadFrom.
+// buildICYStream builds raw ICY protocol bytes for testing readStream.
 func buildICYStream(metaInt int, entries []string) []byte {
 	var buf bytes.Buffer
 	audio := bytes.Repeat([]byte{0xFF}, metaInt)
@@ -71,7 +72,7 @@ func TestReadStreamTitle(t *testing.T) {
 	ch := make(chan *marker.Marker, 10)
 	ctx := context.Background()
 
-	err := r.ReadFrom(ctx, bytes.NewReader(stream), ch)
+	err := r.readStream(ctx, bytes.NewReader(stream), ch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestReadMultipleTitles(t *testing.T) {
 
 	r := NewReader("http://test", 16)
 	ch := make(chan *marker.Marker, 10)
-	err := r.ReadFrom(context.Background(), bytes.NewReader(stream), ch)
+	err := r.readStream(context.Background(), bytes.NewReader(stream), ch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -122,7 +123,7 @@ func TestReadDuplicateSuppression(t *testing.T) {
 
 	r := NewReader("http://test", 16)
 	ch := make(chan *marker.Marker, 10)
-	err := r.ReadFrom(context.Background(), bytes.NewReader(stream), ch)
+	err := r.readStream(context.Background(), bytes.NewReader(stream), ch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,7 +147,7 @@ func TestReadEmptyMetadata(t *testing.T) {
 
 	r := NewReader("http://test", 16)
 	ch := make(chan *marker.Marker, 10)
-	err := r.ReadFrom(context.Background(), bytes.NewReader(buf.Bytes()), ch)
+	err := r.readStream(context.Background(), bytes.NewReader(buf.Bytes()), ch)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestReadMarkerType(t *testing.T) {
 
 	r := NewReader("http://test", 16)
 	ch := make(chan *marker.Marker, 10)
-	_ = r.ReadFrom(context.Background(), bytes.NewReader(stream), ch)
+	_ = r.readStream(context.Background(), bytes.NewReader(stream), ch)
 	close(ch)
 
 	m := <-ch
@@ -203,7 +204,7 @@ func TestReadContextCancellation(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- r.ReadFrom(ctx, pr, ch)
+		done <- r.readStream(ctx, pr, ch)
 	}()
 
 	cancel()
@@ -240,6 +241,37 @@ func TestReadHTTPServer(t *testing.T) {
 	}
 }
 
+func TestReadRejectsNonOKStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte("forbidden"))
+	}))
+	defer srv.Close()
+
+	r := NewReader(srv.URL, 16)
+	ch := make(chan *marker.Marker, 1)
+	err := r.Read(context.Background(), ch)
+	if err == nil {
+		t.Fatal("expected non-OK status error")
+	}
+}
+
+func TestReadStreamRejectsOversizedMetaInt(t *testing.T) {
+	r := NewReader("http://test", MaxMetaInt+1)
+	ch := make(chan *marker.Marker, 1)
+
+	err := r.readStream(context.Background(), strings.NewReader(""), ch)
+	if err == nil {
+		t.Fatal("expected oversized metaint error")
+	}
+	if !strings.Contains(err.Error(), "invalid icy-metaint") {
+		t.Fatalf("error = %q, want invalid icy-metaint", err.Error())
+	}
+	if len(ch) != 0 {
+		t.Fatalf("unexpected markers emitted: %d", len(ch))
+	}
+}
+
 func TestSanitize(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -262,7 +294,7 @@ func TestSanitize(t *testing.T) {
 	}
 }
 
-func TestParseStreamTitle(t *testing.T) {
+func TestParseFieldsStreamTitle(t *testing.T) {
 	tests := []struct {
 		input string
 		want  string
@@ -274,9 +306,9 @@ func TestParseStreamTitle(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := parseStreamTitle(tt.input)
+			got := parseFields(tt.input)["StreamTitle"]
 			if got != tt.want {
-				t.Errorf("parseStreamTitle(%q) = %q, want %q", tt.input, got, tt.want)
+				t.Errorf("StreamTitle from parseFields(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}

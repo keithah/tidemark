@@ -24,7 +24,7 @@ jobs:
           go-version-file: go.mod
 
       - name: Run tests
-        run: go test ./... -count=1
+        run: go test ./...
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6

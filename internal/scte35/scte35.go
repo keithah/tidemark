@@ -43,7 +43,7 @@ func Decode(payload, source, tag string) (*marker.Marker, error) {
 			return
 		}
 
-		m = cueToMarker(cue, source, tag)
+		m = MarkerFromCue(cue, source, tag)
 	}()
 
 	if decodeErr != nil {
@@ -52,18 +52,24 @@ func Decode(payload, source, tag string) (*marker.Marker, error) {
 	return m, nil
 }
 
-func cueToMarker(cue *cuei.Cue, source, tag string) *marker.Marker {
-	fields := make(map[string]string)
+// MarkerFromCue converts a decoded cuei cue into the canonical marker shape.
+func MarkerFromCue(cue *cuei.Cue, source, tag string) *marker.Marker {
+	if cue == nil {
+		return nil
+	}
+
+	details := &marker.SCTE35Details{}
 
 	if cue.Command != nil {
-		fields["CommandName"] = cue.Command.Name
+		details.CommandName = cue.Command.Name
 
 		if cue.Command.Name == "Splice Insert" {
-			fields["OutOfNetworkIndicator"] = fmt.Sprintf("%v", cue.Command.OutOfNetworkIndicator)
+			oon := cue.Command.OutOfNetworkIndicator
+			details.OutOfNetworkIndicator = &oon
 			if cue.Command.BreakDuration > 0 {
-				fields["BreakDuration"] = fmt.Sprintf("%.3f", cue.Command.BreakDuration)
+				details.BreakDuration = cue.Command.BreakDuration
 			}
-			fields["SpliceEventID"] = fmt.Sprintf("0x%x", cue.Command.SpliceEventID)
+			details.SpliceEventID = fmt.Sprintf("0x%x", cue.Command.SpliceEventID)
 		}
 	}
 
@@ -76,7 +82,7 @@ func cueToMarker(cue *cuei.Cue, source, tag string) *marker.Marker {
 	if len(cue.Descriptors) > 0 {
 		for _, d := range cue.Descriptors {
 			if d.SegmentationTypeID > 0 {
-				fields["SegmentationTypeID"] = fmt.Sprintf("0x%02x", d.SegmentationTypeID)
+				details.SegmentationTypeID = d.SegmentationTypeID
 			}
 		}
 	}
@@ -87,7 +93,28 @@ func cueToMarker(cue *cuei.Cue, source, tag string) *marker.Marker {
 		Tag:    tag,
 		PTS:    pts,
 		RawB64: "",
-		Fields: fields,
+		Fields: detailsFields(*details),
+		SCTE35: details,
 	}
 	return m
+}
+
+func detailsFields(details marker.SCTE35Details) map[string]string {
+	fields := make(map[string]string, 5)
+	if details.CommandName != "" {
+		fields["CommandName"] = details.CommandName
+	}
+	if details.OutOfNetworkIndicator != nil {
+		fields["OutOfNetworkIndicator"] = fmt.Sprintf("%v", *details.OutOfNetworkIndicator)
+	}
+	if details.BreakDuration > 0 {
+		fields["BreakDuration"] = fmt.Sprintf("%.3f", details.BreakDuration)
+	}
+	if details.SpliceEventID != "" {
+		fields["SpliceEventID"] = details.SpliceEventID
+	}
+	if details.SegmentationTypeID > 0 {
+		fields["SegmentationTypeID"] = fmt.Sprintf("0x%02x", details.SegmentationTypeID)
+	}
+	return fields
 }

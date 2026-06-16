@@ -1,7 +1,7 @@
 package marker
 
 import (
-	"encoding/json"
+	"strconv"
 	"time"
 )
 
@@ -54,7 +54,7 @@ func (m MarkerType) String() string {
 }
 
 func (m MarkerType) MarshalJSON() ([]byte, error) {
-	return json.Marshal(m.String())
+	return strconv.AppendQuote(nil, m.String()), nil
 }
 
 // Classification identifies the ad transition type.
@@ -78,13 +78,23 @@ func (c Classification) String() string {
 }
 
 func (c Classification) MarshalJSON() ([]byte, error) {
-	return json.Marshal(c.String())
+	return strconv.AppendQuote(nil, c.String()), nil
 }
 
 // DetectResult holds the stream detection outcome.
 type DetectResult struct {
 	Type    StreamType
 	MetaInt int // ICY metaint value, if detected
+}
+
+// SCTE35Details is the typed internal representation used for classification.
+// Fields remains on Marker for stable JSON/detail output.
+type SCTE35Details struct {
+	CommandName           string
+	OutOfNetworkIndicator *bool
+	BreakDuration         float64
+	SpliceEventID         string
+	SegmentationTypeID    uint8
 }
 
 // Marker is the canonical ad marker type emitted by all detectors.
@@ -96,9 +106,8 @@ type Marker struct {
 	PTS            float64           `json:"PTS,omitempty"`
 	Segment        int               `json:"Segment,omitempty"`
 	RawB64         string            `json:"RawBase64,omitempty"`
-	Command        interface{}       `json:"Command,omitempty"`
-	Descriptors    interface{}       `json:"Descriptors,omitempty"`
 	Tags           map[string]string `json:"Tags,omitempty"`
 	Fields         map[string]string `json:"Fields,omitempty"`
+	SCTE35         *SCTE35Details    `json:"-"`
 	Timestamp      time.Time         `json:"Timestamp"`
 }

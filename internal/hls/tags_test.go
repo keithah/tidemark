@@ -7,6 +7,7 @@ import (
 )
 
 func TestParseSCTE35Tag(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		line    string
@@ -40,6 +41,7 @@ func TestParseSCTE35Tag(t *testing.T) {
 }
 
 func TestParseOATCLSTag(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		line    string
@@ -65,6 +67,7 @@ func TestParseOATCLSTag(t *testing.T) {
 }
 
 func TestParseDateRangeTag(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		line    string
@@ -116,6 +119,7 @@ func TestParseDateRangeTag(t *testing.T) {
 }
 
 func TestParseCueOutTag(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		line string
@@ -140,6 +144,7 @@ func TestParseCueOutTag(t *testing.T) {
 }
 
 func TestParseCueInTag(t *testing.T) {
+	t.Parallel()
 	r := ParseLine("#EXT-X-CUE-IN")
 	if r == nil {
 		t.Fatal("expected non-nil")
@@ -153,6 +158,7 @@ func TestParseCueInTag(t *testing.T) {
 }
 
 func TestParseLineNonSCTE35(t *testing.T) {
+	t.Parallel()
 	tests := []string{
 		"#EXTM3U",
 		"#EXT-X-TARGETDURATION:6",
@@ -169,6 +175,7 @@ func TestParseLineNonSCTE35(t *testing.T) {
 }
 
 func TestParseAttributes(t *testing.T) {
+	t.Parallel()
 	attrs := parseAttributes(`ID="test",DURATION=30.0,TITLE="Hello, World"`)
 	if attrs["ID"] != "test" {
 		t.Errorf("ID = %q", attrs["ID"])

@@ -2,6 +2,7 @@ package udp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -9,7 +10,10 @@ import (
 
 	"github.com/keithah/tidemark/internal/marker"
 	"github.com/keithah/tidemark/internal/mpegts"
+	"github.com/keithah/tidemark/internal/pipeline"
 )
+
+const udpReadBufferBytes = 2 << 20
 
 // Reader reads MPEGTS data from UDP multicast and decodes SCTE-35.
 type Reader struct {
@@ -43,31 +47,47 @@ func (r *Reader) Read(ctx context.Context, ch chan<- *marker.Marker) error {
 	if err != nil {
 		return fmt.Errorf("listen multicast: %w", err)
 	}
-	defer conn.Close()
+	if err := conn.SetReadBuffer(udpReadBufferBytes); err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("set read buffer: %w", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	defer func() {
+		close(done)
+		_ = conn.Close()
+	}()
 
 	buf := make([]byte, 1316) // 7 * 188 bytes (standard MPEGTS datagram size)
 
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		_ = conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		n, err := conn.Read(buf)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, net.ErrClosed) {
+				return ctxErr
+			}
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				continue // Timeout — check ctx and retry
 			}
 			return fmt.Errorf("read: %w", err)
 		}
 
-		markers := r.decoder.DecodeBuf(buf[:n])
+		markers, err := r.decoder.DecodeBuf(buf[:n])
+		if err != nil {
+			return err
+		}
 		for _, m := range markers {
 			m.Source = "udp_multicast"
 			m.Timestamp = time.Now()
-			ch <- m
+			if err := pipeline.SendMarker(ctx, ch, m); err != nil {
+				return err
+			}
 		}
 	}
 }

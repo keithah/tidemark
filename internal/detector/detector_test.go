@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
 	"github.com/keithah/tidemark/internal/marker"
 )
 
@@ -110,6 +111,66 @@ func TestDetectUnknown(t *testing.T) {
 	}
 }
 
+func TestDetectUsesHEADForHeaderProbe(t *testing.T) {
+	var method string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method = r.Method
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	result, err := Detect(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("Detect error: %v", err)
+	}
+	if result.Type != marker.StreamHLS {
+		t.Fatalf("Type = %s, want HLS", result.Type)
+	}
+	if method != http.MethodHead {
+		t.Fatalf("method = %s, want HEAD", method)
+	}
+}
+
+func TestDetectFallsBackToGETWhenHEADUnsupported(t *testing.T) {
+	var methods []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method)
+		if r.Method == http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	result, err := Detect(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("Detect error: %v", err)
+	}
+	if result.Type != marker.StreamICY {
+		t.Fatalf("Type = %s, want ICY", result.Type)
+	}
+	if len(methods) != 2 || methods[0] != http.MethodHead || methods[1] != http.MethodGet {
+		t.Fatalf("methods = %v, want [HEAD GET]", methods)
+	}
+}
+
+func TestDetectRejectsNonOKProbeStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("not found"))
+	}))
+	defer srv.Close()
+
+	_, err := Detect(context.Background(), srv.URL)
+	if err == nil {
+		t.Fatal("expected non-OK probe status error")
+	}
+}
+
 func TestDetectContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
@@ -122,5 +183,21 @@ func TestDetectContextCancelled(t *testing.T) {
 	_, err := Detect(ctx, srv.URL)
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
+	}
+}
+
+func TestHTTPGetRejectsNonOKStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte("forbidden"))
+	}))
+	defer srv.Close()
+
+	resp, err := HTTPGet(context.Background(), srv.URL)
+	if err == nil {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		t.Fatal("expected non-OK status error")
 	}
 }

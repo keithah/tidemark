@@ -12,10 +12,20 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/keithah/tidemark/internal/httpclient"
 	"github.com/keithah/tidemark/internal/marker"
+	"github.com/keithah/tidemark/internal/pipeline"
 )
 
-const defaultMetaInt = 16000
+const (
+	defaultMetaInt = 16000
+
+	// MaxMetaInt caps the remote icy-metaint value before allocating an audio buffer.
+	MaxMetaInt = 1 << 20
+
+	audioDiscardBufferSize = 32 * 1024
+	maxMetadataSize        = 255 * 16
+)
 
 // Reader reads ICY metadata from an Icecast/SHOUTcast stream.
 type Reader struct {
@@ -36,7 +46,7 @@ func NewReader(url string, metaInt int) *Reader {
 // StreamTitle changes. It blocks until the context is cancelled or the
 // stream ends.
 func (r *Reader) Read(ctx context.Context, ch chan<- *marker.Marker) error {
-	client := &http.Client{}
+	client := httpclient.NewStreaming()
 	req, err := http.NewRequestWithContext(ctx, "GET", r.url, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
@@ -47,19 +57,25 @@ func (r *Reader) Read(ctx context.Context, ch chan<- *marker.Marker) error {
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
+
+	if resp.StatusCode != http.StatusOK {
+		httpclient.DrainAndClose(resp.Body)
+		return fmt.Errorf("connect: status %d", resp.StatusCode)
+	}
+	resp.Body = httpclient.WithIdleReadTimeout(resp.Body, httpclient.DefaultIdleReadTimeout)
 	defer func() { _ = resp.Body.Close() }()
 
 	return r.readStream(ctx, resp.Body, ch)
 }
 
-// ReadFrom reads ICY metadata from an arbitrary reader (for testing).
-func (r *Reader) ReadFrom(ctx context.Context, stream io.Reader, ch chan<- *marker.Marker) error {
-	return r.readStream(ctx, stream, ch)
-}
-
 func (r *Reader) readStream(ctx context.Context, stream io.Reader, ch chan<- *marker.Marker) error {
+	if r.metaInt <= 0 || r.metaInt > MaxMetaInt {
+		return fmt.Errorf("invalid icy-metaint: %d", r.metaInt)
+	}
+
 	reader := bufio.NewReader(stream)
-	buf := make([]byte, r.metaInt)
+	audioBuf := make([]byte, min(r.metaInt, audioDiscardBufferSize))
+	metaBuf := make([]byte, maxMetadataSize)
 	var prevTitle string
 
 	for {
@@ -70,7 +86,7 @@ func (r *Reader) readStream(ctx context.Context, stream io.Reader, ch chan<- *ma
 		}
 
 		// Read audio data
-		n, err := io.ReadFull(reader, buf)
+		n, err := discardAudio(reader, audioBuf, r.metaInt)
 		if err != nil {
 			if n == 0 && (err == io.EOF || err == io.ErrUnexpectedEOF) {
 				return nil // clean end
@@ -90,9 +106,8 @@ func (r *Reader) readStream(ctx context.Context, stream io.Reader, ch chan<- *ma
 		}
 
 		// Read metadata
-		meta := make([]byte, metaSize)
-		_, err = io.ReadFull(reader, meta)
-		if err != nil {
+		meta := metaBuf[:metaSize]
+		if _, err = io.ReadFull(reader, meta); err != nil {
 			return fmt.Errorf("read metadata: %w", err)
 		}
 
@@ -102,21 +117,39 @@ func (r *Reader) readStream(ctx context.Context, stream io.Reader, ch chan<- *ma
 			continue
 		}
 
-		title := parseStreamTitle(sanitized)
+		fields := parseFields(sanitized)
+		title := fields["StreamTitle"]
 		if title == "" || title == prevTitle {
 			continue
 		}
 		prevTitle = title
 
-		fields := parseFields(sanitized)
 		m := &marker.Marker{
 			Type:      marker.MarkerICY,
 			Source:    "icy_stream",
-			Fields:   fields,
+			Fields:    fields,
 			Timestamp: time.Now(),
 		}
-		ch <- m
+		if err := pipeline.SendMarker(ctx, ch, m); err != nil {
+			return err
+		}
 	}
+}
+
+func discardAudio(reader io.Reader, buf []byte, bytesToDiscard int) (int, error) {
+	total := 0
+	for total < bytesToDiscard {
+		n := bytesToDiscard - total
+		if n > len(buf) {
+			n = len(buf)
+		}
+		read, err := io.ReadFull(reader, buf[:n])
+		total += read
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
 }
 
 // sanitize removes null bytes and non-printable characters, ensuring valid UTF-8.
@@ -132,7 +165,10 @@ func sanitize(data []byte) string {
 	}
 
 	var b strings.Builder
-	for _, r := range string(data) {
+	b.Grow(len(data))
+	for len(data) > 0 {
+		r, size := utf8.DecodeRune(data)
+		data = data[size:]
 		if unicode.IsPrint(r) {
 			b.WriteRune(r)
 		}
@@ -140,43 +176,25 @@ func sanitize(data []byte) string {
 	return b.String()
 }
 
-// parseStreamTitle extracts StreamTitle from ICY metadata string.
-func parseStreamTitle(meta string) string {
-	const prefix = "StreamTitle='"
-	for _, part := range strings.Split(meta, ";") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, prefix) && len(part) > len(prefix) {
-			// Remove trailing single quote
-			val := part[len(prefix):]
-			if strings.HasSuffix(val, "'") {
-				val = val[:len(val)-1]
-			}
-			return val
-		}
-	}
-	return ""
-}
-
 // parseFields parses ICY metadata into a map of key=value pairs.
 func parseFields(meta string) map[string]string {
-	fields := make(map[string]string)
-	for _, part := range strings.Split(meta, ";") {
+	fields := make(map[string]string, strings.Count(meta, ";")+1)
+	for {
+		part, rest, found := strings.Cut(meta, ";")
 		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+		if part != "" {
+			key, val, ok := strings.Cut(part, "=")
+			if ok {
+				if len(val) >= 2 && val[0] == '\'' && val[len(val)-1] == '\'' {
+					val = val[1 : len(val)-1]
+				}
+				fields[key] = val
+			}
 		}
-		// Handle key='value' format
-		eqIdx := strings.Index(part, "=")
-		if eqIdx < 0 {
-			continue
+		if !found {
+			break
 		}
-		key := part[:eqIdx]
-		val := part[eqIdx+1:]
-		// Strip surrounding quotes
-		if len(val) >= 2 && val[0] == '\'' && val[len(val)-1] == '\'' {
-			val = val[1 : len(val)-1]
-		}
-		fields[key] = val
+		meta = rest
 	}
 	return fields
 }

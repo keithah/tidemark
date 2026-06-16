@@ -5,6 +5,8 @@ import (
 	"context"
 	"io"
 	"testing"
+	"time"
+
 	"github.com/keithah/tidemark/internal/marker"
 )
 
@@ -20,7 +22,10 @@ func TestNewDecoder(t *testing.T) {
 
 func TestDecodeBufEmpty(t *testing.T) {
 	d := NewDecoder()
-	markers := d.DecodeBuf(nil)
+	markers, err := d.DecodeBuf(nil)
+	if err != nil {
+		t.Fatalf("DecodeBuf: %v", err)
+	}
 	if len(markers) != 0 {
 		t.Errorf("expected 0 markers for nil input, got %d", len(markers))
 	}
@@ -28,25 +33,34 @@ func TestDecodeBufEmpty(t *testing.T) {
 
 func TestDecodeBufEmptySlice(t *testing.T) {
 	d := NewDecoder()
-	markers := d.DecodeBuf([]byte{})
+	markers, err := d.DecodeBuf([]byte{})
+	if err != nil {
+		t.Fatalf("DecodeBuf: %v", err)
+	}
 	if len(markers) != 0 {
 		t.Errorf("expected 0 markers for empty input, got %d", len(markers))
 	}
 }
 
-func TestDecodeBufPanicRecovery(t *testing.T) {
-	d := NewDecoder()
-	// Garbage data should not panic
-	markers := d.DecodeBuf([]byte{0xFF, 0xFE, 0xFD, 0xFC, 0xFB})
-	// We don't expect markers from garbage, just no panic
-	_ = markers
+func TestDecodeBufReportsDecoderPanic(t *testing.T) {
+	d := &Decoder{}
+	markers, err := d.DecodeBuf([]byte{0x47})
+	if err == nil {
+		t.Fatal("expected decoder panic error")
+	}
+	if markers != nil {
+		t.Fatalf("markers = %v, want nil on decoder panic", markers)
+	}
 }
 
 func TestDecodeBufNoSCTE35(t *testing.T) {
 	d := NewDecoder()
 	// Valid-ish MPEGTS sync bytes but no SCTE-35
 	data := bytes.Repeat([]byte{0x47, 0x00, 0x00, 0x10}, 47) // 188 bytes = 1 packet
-	markers := d.DecodeBuf(data)
+	markers, err := d.DecodeBuf(data)
+	if err != nil {
+		t.Fatalf("DecodeBuf: %v", err)
+	}
 	if len(markers) != 0 {
 		t.Errorf("expected 0 markers for non-SCTE35 data, got %d", len(markers))
 	}
@@ -54,6 +68,7 @@ func TestDecodeBufNoSCTE35(t *testing.T) {
 
 func TestDecodeReaderContextCancel(t *testing.T) {
 	pr, pw := io.Pipe()
+	defer pw.Close()
 	go func() {
 		// Write some data then keep pipe open
 		pw.Write(bytes.Repeat([]byte{0x47, 0x00, 0x00, 0x10}, 47))
@@ -69,11 +84,14 @@ func TestDecodeReaderContextCancel(t *testing.T) {
 	}()
 
 	cancel()
-	pw.Close()
 
-	err := <-done
-	if err != nil && err != context.Canceled {
-		t.Logf("error: %v (acceptable)", err)
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Fatalf("DecodeReader error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DecodeReader did not unblock after context cancellation")
 	}
 }
 
@@ -88,17 +106,10 @@ func TestDecodeReaderEOF(t *testing.T) {
 	}
 }
 
-func TestCueToMarkerNil(t *testing.T) {
-	m := cueToMarker(nil)
-	if m != nil {
-		t.Error("expected nil for nil cue")
-	}
-}
-
 func TestDecodeBufLargeGarbage(t *testing.T) {
 	d := NewDecoder()
 	// Large garbage data — should not panic
 	garbage := bytes.Repeat([]byte{0xDE, 0xAD, 0xBE, 0xEF}, 1000)
-	markers := d.DecodeBuf(garbage)
+	markers, _ := d.DecodeBuf(garbage)
 	_ = markers // no panic = pass
 }

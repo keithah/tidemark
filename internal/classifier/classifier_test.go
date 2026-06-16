@@ -1,11 +1,12 @@
 package classifier
 
 import (
-	"testing"
 	"github.com/keithah/tidemark/internal/marker"
+	"testing"
 )
 
 func TestClassifyICYAdStart(t *testing.T) {
+	t.Parallel()
 	c := New()
 	tests := []struct {
 		title string
@@ -29,6 +30,7 @@ func TestClassifyICYAdStart(t *testing.T) {
 }
 
 func TestClassifyICYUnknown(t *testing.T) {
+	t.Parallel()
 	c := New()
 	m := &marker.Marker{Type: marker.MarkerICY, Fields: map[string]string{"StreamTitle": "My Favorite Song"}}
 	got := c.Classify(m)
@@ -38,6 +40,7 @@ func TestClassifyICYUnknown(t *testing.T) {
 }
 
 func TestClassifyICYAdEnd(t *testing.T) {
+	t.Parallel()
 	c := New()
 	// First, see an ad
 	ad := &marker.Marker{Type: marker.MarkerICY, Fields: map[string]string{"StreamTitle": "Ad Break"}}
@@ -52,6 +55,7 @@ func TestClassifyICYAdEnd(t *testing.T) {
 }
 
 func TestClassifyICYFullCycle(t *testing.T) {
+	t.Parallel()
 	c := New()
 
 	steps := []struct {
@@ -75,6 +79,7 @@ func TestClassifyICYFullCycle(t *testing.T) {
 }
 
 func TestClassifyICYWordBoundary(t *testing.T) {
+	t.Parallel()
 	c := New()
 	// "administer" contains "ad" but should not match at word boundary
 	m := &marker.Marker{Type: marker.MarkerICY, Fields: map[string]string{"StreamTitle": "The Administrator"}}
@@ -85,6 +90,7 @@ func TestClassifyICYWordBoundary(t *testing.T) {
 }
 
 func TestClassifyICYCaseInsensitive(t *testing.T) {
+	t.Parallel()
 	c := New()
 	m := &marker.Marker{Type: marker.MarkerICY, Fields: map[string]string{"StreamTitle": "SPOT break"}}
 	got := c.Classify(m)
@@ -94,6 +100,7 @@ func TestClassifyICYCaseInsensitive(t *testing.T) {
 }
 
 func TestClassifySCTE35SpliceInsertOON(t *testing.T) {
+	t.Parallel()
 	m := &marker.Marker{
 		Type:   marker.MarkerSCTE35,
 		Fields: map[string]string{"CommandName": "Splice Insert", "OutOfNetworkIndicator": "true"},
@@ -106,6 +113,7 @@ func TestClassifySCTE35SpliceInsertOON(t *testing.T) {
 }
 
 func TestClassifySCTE35SpliceInsertReturn(t *testing.T) {
+	t.Parallel()
 	m := &marker.Marker{
 		Type:   marker.MarkerSCTE35,
 		Fields: map[string]string{"CommandName": "Splice Insert", "OutOfNetworkIndicator": "false"},
@@ -118,6 +126,7 @@ func TestClassifySCTE35SpliceInsertReturn(t *testing.T) {
 }
 
 func TestClassifySCTE35TimeSignal(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		segType string
@@ -147,6 +156,7 @@ func TestClassifySCTE35TimeSignal(t *testing.T) {
 }
 
 func TestClassifySCTE35SpliceNull(t *testing.T) {
+	t.Parallel()
 	m := &marker.Marker{
 		Type:   marker.MarkerSCTE35,
 		Fields: map[string]string{"CommandName": "Splice Null"},
@@ -159,6 +169,7 @@ func TestClassifySCTE35SpliceNull(t *testing.T) {
 }
 
 func TestClassifySCTE35NilFields(t *testing.T) {
+	t.Parallel()
 	m := &marker.Marker{Type: marker.MarkerSCTE35}
 	c := New()
 	got := c.Classify(m)
@@ -168,10 +179,11 @@ func TestClassifySCTE35NilFields(t *testing.T) {
 }
 
 func TestClassifyID3AdStart(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name  string
-		tags  map[string]string
-		want  marker.Classification
+		name string
+		tags map[string]string
+		want marker.Classification
 	}{
 		{"TXXX with ad", map[string]string{"TXXX": "ad_id:abc123"}, marker.AdStart},
 		{"TIT2 with spot", map[string]string{"TIT2": "Spot Break"}, marker.AdStart},
@@ -191,6 +203,7 @@ func TestClassifyID3AdStart(t *testing.T) {
 }
 
 func TestClassifyID3AdEnd(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		tags map[string]string
@@ -212,6 +225,7 @@ func TestClassifyID3AdEnd(t *testing.T) {
 }
 
 func TestClassifyID3Unknown(t *testing.T) {
+	t.Parallel()
 	m := &marker.Marker{Type: marker.MarkerID3, Tags: map[string]string{"TIT2": "My Favorite Song"}}
 	c := New()
 	got := c.Classify(m)
@@ -221,6 +235,7 @@ func TestClassifyID3Unknown(t *testing.T) {
 }
 
 func TestClassifyID3CaseInsensitive(t *testing.T) {
+	t.Parallel()
 	m := &marker.Marker{Type: marker.MarkerID3, Tags: map[string]string{"TIT2": "AD BREAK"}}
 	c := New()
 	got := c.Classify(m)

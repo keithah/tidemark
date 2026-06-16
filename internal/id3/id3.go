@@ -15,6 +15,148 @@ type Tag struct {
 	Value string
 }
 
+var id3Marker = []byte("ID3")
+
+// Scanner incrementally extracts complete ID3 tags from a byte stream.
+type Scanner struct {
+	maxTagBytes int
+	buf         []byte
+}
+
+// NewScanner creates an incremental ID3 scanner with a maximum complete tag size.
+func NewScanner(maxTagBytes int) *Scanner {
+	if maxTagBytes <= 0 {
+		maxTagBytes = 1 << 20
+	}
+	return &Scanner{maxTagBytes: maxTagBytes}
+}
+
+// Write appends stream bytes and returns any complete ID3 tags found.
+func (s *Scanner) Write(data []byte) ([]Tag, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	s.buf = append(s.buf, data...)
+	return s.scan(false)
+}
+
+// Flush returns complete tags still buffered and discards incomplete trailing bytes.
+func (s *Scanner) Flush() ([]Tag, error) {
+	return s.scan(true)
+}
+
+func (s *Scanner) scan(flush bool) ([]Tag, error) {
+	tags := make([]Tag, 0, 4)
+	needsCompact := false
+	compactIfNeeded := func() {
+		if needsCompact {
+			s.compact()
+		}
+	}
+	for {
+		idx := bytes.Index(s.buf, id3Marker)
+		if idx < 0 {
+			if flush || len(s.buf) <= 2 {
+				if flush {
+					s.buf = nil
+				}
+				return tags, nil
+			}
+			s.keepTail(2)
+			return tags, nil
+		}
+		if idx > 0 {
+			s.advance(idx)
+			needsCompact = true
+		}
+		if len(s.buf) < 10 {
+			if flush {
+				s.buf = nil
+			} else {
+				compactIfNeeded()
+			}
+			return tags, nil
+		}
+		version := int(s.buf[3])
+		if version != 3 && version != 4 {
+			s.advance(3)
+			needsCompact = true
+			continue
+		}
+		sizeBytes := s.buf[6:10]
+		validSize := true
+		for _, b := range sizeBytes {
+			if b >= 0x80 {
+				validSize = false
+				break
+			}
+		}
+		if !validSize {
+			s.advance(3)
+			needsCompact = true
+			continue
+		}
+		tagSize := decodeSynchsafe(sizeBytes)
+		if tagSize <= 0 {
+			s.advance(10)
+			needsCompact = true
+			continue
+		}
+		total := 10 + tagSize
+		if total > s.maxTagBytes {
+			compactIfNeeded()
+			return tags, fmt.Errorf("ID3 tag too large: exceeds %d bytes", s.maxTagBytes)
+		}
+		if len(s.buf) < total {
+			if flush {
+				s.buf = nil
+			} else {
+				compactIfNeeded()
+			}
+			return tags, nil
+		}
+		found, err := Parse(s.buf[:total])
+		if err != nil {
+			compactIfNeeded()
+			return tags, err
+		}
+		tags = append(tags, found...)
+		s.advance(total)
+		needsCompact = true
+	}
+}
+
+func (s *Scanner) advance(n int) {
+	if n <= 0 {
+		return
+	}
+	if n >= len(s.buf) {
+		s.buf = s.buf[:0]
+		return
+	}
+	s.buf = s.buf[n:]
+}
+
+func (s *Scanner) keepTail(n int) {
+	if n <= 0 || len(s.buf) == 0 {
+		s.buf = nil
+		return
+	}
+	if n > len(s.buf) {
+		n = len(s.buf)
+	}
+	tail := append([]byte(nil), s.buf[len(s.buf)-n:]...)
+	s.buf = tail
+}
+
+func (s *Scanner) compact() {
+	if len(s.buf) == 0 {
+		s.buf = s.buf[:0]
+		return
+	}
+	s.buf = append([]byte(nil), s.buf...)
+}
+
 // Parse scans raw bytes for ID3v2 tags and extracts frames.
 // Returns all found tags. Supports v2.3 and v2.4.
 func Parse(data []byte) ([]Tag, error) {
@@ -22,11 +164,11 @@ func Parse(data []byte) ([]Tag, error) {
 		return nil, nil
 	}
 
-	var tags []Tag
+	tags := make([]Tag, 0, 4)
 	offset := 0
 
 	for {
-		idx := bytes.Index(data[offset:], []byte("ID3"))
+		idx := bytes.Index(data[offset:], id3Marker)
 		if idx < 0 {
 			break
 		}
@@ -103,9 +245,9 @@ func Parse(data []byte) ([]Tag, error) {
 			}
 
 			frameData := data[frameDataStart:frameDataEnd]
-			tag := parseFrame(frameID, frameData)
-			if tag != nil {
-				tags = append(tags, *tag)
+			tag, ok := parseFrame(frameID, frameData)
+			if ok {
+				tags = append(tags, tag)
 			}
 
 			pos = frameDataEnd
@@ -117,7 +259,7 @@ func Parse(data []byte) ([]Tag, error) {
 	return tags, nil
 }
 
-func parseFrame(id string, data []byte) *Tag {
+func parseFrame(id string, data []byte) (Tag, bool) {
 	switch {
 	case strings.HasPrefix(id, "T") && id != "TXXX":
 		return parseTextFrame(id, data)
@@ -140,18 +282,18 @@ func parseFrame(id string, data []byte) *Tag {
 	}
 }
 
-func parseTextFrame(id string, data []byte) *Tag {
+func parseTextFrame(id string, data []byte) (Tag, bool) {
 	if len(data) < 2 {
-		return nil
+		return Tag{}, false
 	}
 	encoding := data[0]
 	text := decodeText(data[1:], encoding)
-	return &Tag{ID: id, Value: text}
+	return Tag{ID: id, Value: text}, true
 }
 
-func parseTXXXFrame(data []byte) *Tag {
+func parseTXXXFrame(data []byte) (Tag, bool) {
 	if len(data) < 2 {
-		return nil
+		return Tag{}, false
 	}
 	encoding := data[0]
 	rest := data[1:]
@@ -162,25 +304,25 @@ func parseTXXXFrame(data []byte) *Tag {
 	valueText := decodeText(value, encoding)
 
 	if descText != "" {
-		return &Tag{ID: "TXXX", Value: descText + ":" + valueText}
+		return Tag{ID: "TXXX", Value: descText + ":" + valueText}, true
 	}
-	return &Tag{ID: "TXXX", Value: valueText}
+	return Tag{ID: "TXXX", Value: valueText}, true
 }
 
-func parsePRIVFrame(data []byte) *Tag {
+func parsePRIVFrame(data []byte) (Tag, bool) {
 	// owner\x00binary_data
 	nullIdx := bytes.IndexByte(data, 0)
 	if nullIdx < 0 {
-		return &Tag{ID: "PRIV", Value: hex.EncodeToString(data)}
+		return Tag{ID: "PRIV", Value: hex.EncodeToString(data)}, true
 	}
 	owner := string(data[:nullIdx])
 	binary := data[nullIdx+1:]
-	return &Tag{ID: "PRIV", Value: owner + ":" + hex.EncodeToString(binary)}
+	return Tag{ID: "PRIV", Value: owner + ":" + hex.EncodeToString(binary)}, true
 }
 
-func parseGEOBFrame(data []byte) *Tag {
+func parseGEOBFrame(data []byte) (Tag, bool) {
 	if len(data) < 4 {
-		return nil
+		return Tag{}, false
 	}
 	encoding := data[0]
 	rest := data[1:]
@@ -188,7 +330,7 @@ func parseGEOBFrame(data []byte) *Tag {
 	// mime type (ISO-8859-1, null terminated)
 	nullIdx := bytes.IndexByte(rest, 0)
 	if nullIdx < 0 {
-		return nil
+		return Tag{}, false
 	}
 	mime := string(rest[:nullIdx])
 	rest = rest[nullIdx+1:]
@@ -201,15 +343,15 @@ func parseGEOBFrame(data []byte) *Tag {
 	desc, objData := splitOnNull(remaining, encoding)
 	description := decodeText(desc, encoding)
 
-	return &Tag{
+	return Tag{
 		ID:    "GEOB",
 		Value: fmt.Sprintf("%s:%s:%s:%s", mime, filename, description, hex.EncodeToString(objData)),
-	}
+	}, true
 }
 
-func parseLINKFrame(data []byte) *Tag {
+func parseLINKFrame(data []byte) (Tag, bool) {
 	if len(data) == 0 {
-		return nil
+		return Tag{}, false
 	}
 
 	// ID3 LINK frames start with a 4-byte linked frame ID. In the Stingray
@@ -219,39 +361,39 @@ func parseLINKFrame(data []byte) *Tag {
 	}
 	data = bytes.Trim(data, "\x00")
 	if len(data) == 0 {
-		return nil
+		return Tag{}, false
 	}
-	return &Tag{ID: "LINK", Value: string(data)}
+	return Tag{ID: "LINK", Value: string(data)}, true
 }
 
-func parseWXXXFrame(data []byte) *Tag {
+func parseWXXXFrame(data []byte) (Tag, bool) {
 	if len(data) < 2 {
-		return nil
+		return Tag{}, false
 	}
 	encoding := data[0]
 	desc, value := splitOnNull(data[1:], encoding)
 	descText := decodeText(desc, encoding)
 	valueText := strings.Trim(string(bytes.Trim(value, "\x00")), "\x00")
 	if valueText == "" {
-		return nil
+		return Tag{}, false
 	}
 	if descText != "" {
-		return &Tag{ID: "WXXX", Value: descText + ":" + valueText}
+		return Tag{ID: "WXXX", Value: descText + ":" + valueText}, true
 	}
-	return &Tag{ID: "WXXX", Value: valueText}
+	return Tag{ID: "WXXX", Value: valueText}, true
 }
 
-func parseURLFrame(id string, data []byte) *Tag {
+func parseURLFrame(id string, data []byte) (Tag, bool) {
 	value := strings.TrimSpace(string(bytes.Trim(data, "\x00")))
 	if value == "" {
-		return nil
+		return Tag{}, false
 	}
-	return &Tag{ID: id, Value: value}
+	return Tag{ID: id, Value: value}, true
 }
 
-func parseCOMMFrame(data []byte) *Tag {
+func parseCOMMFrame(data []byte) (Tag, bool) {
 	if len(data) < 5 {
-		return nil
+		return Tag{}, false
 	}
 	encoding := data[0]
 	lang := string(data[1:4])
@@ -259,25 +401,25 @@ func parseCOMMFrame(data []byte) *Tag {
 	descText := decodeText(desc, encoding)
 	valueText := decodeText(text, encoding)
 	if valueText == "" {
-		return nil
+		return Tag{}, false
 	}
 	switch {
 	case descText != "" && lang != "":
-		return &Tag{ID: "COMM", Value: lang + ":" + descText + ":" + valueText}
+		return Tag{ID: "COMM", Value: lang + ":" + descText + ":" + valueText}, true
 	case lang != "":
-		return &Tag{ID: "COMM", Value: lang + ":" + valueText}
+		return Tag{ID: "COMM", Value: lang + ":" + valueText}, true
 	default:
-		return &Tag{ID: "COMM", Value: valueText}
+		return Tag{ID: "COMM", Value: valueText}, true
 	}
 }
 
-func parseGenericFrame(id string, data []byte) *Tag {
+func parseGenericFrame(id string, data []byte) (Tag, bool) {
 	if len(data) == 0 {
-		return nil
+		return Tag{}, false
 	}
 	if data[0] <= 0x03 {
 		if text := strings.TrimSpace(decodeText(data[1:], data[0])); text != "" {
-			return &Tag{ID: id, Value: text}
+			return Tag{ID: id, Value: text}, true
 		}
 	}
 
@@ -285,7 +427,7 @@ func parseGenericFrame(id string, data []byte) *Tag {
 	if value == "" {
 		value = hex.EncodeToString(data)
 	}
-	return &Tag{ID: id, Value: value}
+	return Tag{ID: id, Value: value}, true
 }
 
 func decodeText(data []byte, encoding byte) string {

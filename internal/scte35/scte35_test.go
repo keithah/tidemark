@@ -110,6 +110,13 @@ func TestDecodeFieldsNotNil(t *testing.T) {
 	}
 }
 
+func TestMarkerFromCueNil(t *testing.T) {
+	m := MarkerFromCue(nil, "test", "")
+	if m != nil {
+		t.Error("expected nil for nil cue")
+	}
+}
+
 func TestDecodeHexPayload(t *testing.T) {
 	// Hex-encoded version of the splice null payload
 	// cuei's hex decode is broken, so we pre-convert to base64
