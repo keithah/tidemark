@@ -3,6 +3,8 @@
 **Date:** 2026-04-29  
 **Scope:** `internal/id3`, `internal/hls/poller.go`
 
+> Status: Implemented. This is a historical design note; current maintainer behavior is documented in `docs/reference.md`. `ParseFromMPEGTS` now returns grouped timed-ID3 events as `[][]Tag`, and HLS segment decoding emits one marker per event.
+
 ---
 
 ## Problem
@@ -42,7 +44,7 @@ TXXX, PRIV, and GEOB keep their existing dedicated parsers.
 New exported function:
 
 ```go
-func ParseFromMPEGTS(data []byte) ([]Tag, error)
+func ParseFromMPEGTS(data []byte) ([][]Tag, error)
 ```
 
 **Algorithm:**
@@ -59,7 +61,7 @@ func ParseFromMPEGTS(data []byte) ([]Tag, error)
 
 4. **Strip PES header.** Each completed blob may be preceded by a PES header. Search for the first occurrence of bytes `0x49 0x44 0x33` (`ID3`) within the first 32 bytes of the blob. If found, slice from that offset before passing to `Parse`. If not found within 32 bytes, skip the blob — it is not a valid ID3 PES payload.
 
-5. **Merge results.** Call `Parse` on each extracted blob, collect all `[]Tag` slices, return combined slice.
+5. **Group results.** Call `Parse` on each extracted blob and return one `[]Tag` group per timed-ID3 event.
 
 ### 3. HLS poller wire-up (`internal/hls/poller.go`)
 
@@ -70,10 +72,10 @@ One line change in `downloadAndDecode`:
 tags, _ := id3.Parse(data)
 
 // After
-tags, _ := id3.ParseFromMPEGTS(data)
+tagGroups, _ := id3.ParseFromMPEGTS(data)
 ```
 
-No other changes to the poller, marker struct, classifier, or output — ID3 markers already use `Tags map[string]string`, and TPE1/TALB simply become additional keys in that map.
+The segment decoder emits one ID3 marker for each returned tag group so repeated frame IDs in separate timed-ID3 events are not flattened together.
 
 ---
 
@@ -93,11 +95,13 @@ id3.ParseFromMPEGTS(data)
        └─ no ──────────────────► id3.Parse(data)
                                       │
                                       ▼
-                               []Tag{
-                                 {ID: "TIT2", Value: "Song Title"},
-                                 {ID: "TPE1", Value: "Artist Name"},
-                                 {ID: "TALB", Value: "Album Name"},
-                                 {ID: "TXXX", Value: "ad_id:abc123"},
+                               [][]Tag{
+                                 {
+                                   {ID: "TIT2", Value: "Song Title"},
+                                   {ID: "TPE1", Value: "Artist Name"},
+                                   {ID: "TALB", Value: "Album Name"},
+                                   {ID: "TXXX", Value: "ad_id:abc123"},
+                                 },
                                }
                                       │
                                       ▼
@@ -114,7 +118,7 @@ id3.ParseFromMPEGTS(data)
 
 - Malformed TS packets (wrong sync byte, truncated): skip the offending packet and continue. Return whatever tags were successfully parsed.
 - PES payload that starts with `ID3` but is corrupt: `id3.Parse` already returns gracefully with whatever frames it could read.
-- Non-MPEGTS input to `ParseFromMPEGTS`: falls back to `Parse`, no error.
+- Non-MPEGTS input to `ParseFromMPEGTS`: falls back to `Parse`, wraps the result in one group, and returns no error.
 
 ---
 
@@ -131,6 +135,7 @@ All tests in `internal/id3/id3_test.go`. New helper: `buildMPEGTSSegment(pid uin
 | `TestParseFromMPEGTSSinglePacket` | ID3 tag in one TS packet: TPE1/TIT2 extracted |
 | `TestParseFromMPEGTSMultiPacket` | ID3 tag spanning two TS packets: full tag reassembled |
 | `TestParseFromMPEGTSMultiplePIDs` | Two PIDs, one non-ID3: only ID3 PID extracted |
+| `TestParseFromMPEGTSMultipleID3Events` | Multiple timed-ID3 events remain separate groups |
 | `TestParseFromMPEGTSNonID3PES` | PES payloads without `ID3` magic ignored cleanly |
 
 ---

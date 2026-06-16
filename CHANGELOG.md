@@ -7,15 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.1] - 2026-06-16
 
+### Changed
+
+- Reworked the HLS internals into focused playlist polling, playlist parsing, segment planning, and segment decoding components while preserving the CLI behavior.
+- Restored Go's test cache for the default `make test`, release CI, and release workflow paths. Use `make test-fresh` when uncached verbose verification is needed.
+
 ### Fixed
 
-- Improved HLS polling reliability with conditional manifest requests, bounded segment tracking, ordered segment marker emission, faster polling tests, and fail-fast handling for permanent manifest errors.
-- Added streaming idle-read timeouts and stronger cancellation cleanup for ICY, MPEGTS, UDP, and HLS segment readers.
-- Report MPEGTS decoder failures instead of silently treating recovered decoder panics as empty marker results.
-- Hardened ID3 scanning/parsing for incremental streams, oversized tags, lower allocation parsing, and safe terminal/table output.
-- Reduced hot-path allocations in marker classification, JSON output, enum marshaling, HLS attribute parsing, and ID3 segment marker emission.
-- Reworked output flushing and JSON file closing so write, flush, sync, and close errors are surfaced correctly.
-- Restored cached default test paths in `make test`, release CI, and the release workflow while keeping `make test-fresh` for explicit uncached runs.
+- HLS polling now uses conditional manifest requests, preserves already-fetched playlist bodies, honors target-duration pacing, emits segment markers in segment order, and fails fast on permanent manifest errors.
+- Live ICY and direct MPEGTS readers now fail stalled connections after an idle period instead of hanging forever.
+- MPEGTS decoder panics are recovered as errors and reported instead of being silently treated as "no markers found".
+- ID3 parsing now handles incremental stream boundaries and oversized tags without repeated copying or benign EOF noise.
+- Terminal table output strips control characters from metadata values before printing.
+- JSON file output now flushes, syncs, and closes explicitly so write, flush, sync, and close failures are surfaced.
+- UDP cancellation now closes the socket promptly so shutdown does not wait on a blocked read.
+
+### Performance
+
+- Reduced per-marker allocation in marker filtering, classifier keyword checks, JSON output, enum marshaling, HLS attribute parsing, and ID3 segment marker emission.
+
+### Hardening
+
+- Bounded HLS manifest reads, HLS segment reads, segment tracking, and playlist URL caches so long-running streams cannot grow memory without limit.
 
 ## [0.3.0] - 2026-06-04
 
@@ -60,8 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MPEGTS segment decoding** — extracts SCTE-35 from transport stream packets in HLS segments and direct .ts URL streams
 - **UDP multicast support** — reads 1316-byte MPEGTS datagrams from multicast groups
 - **ID3v2 tag extraction** — hand-rolled parser for TIT2, TIT3, TXXX, PRIV, GEOB frames with v2.3/v2.4 and UTF-8/UTF-16/ISO-8859-1 support
-- **Ad classification engine** — classifies markers as AD_START, AD_END, or UNKNOWN using protocol-specific rules (SCTE-35 command/descriptor types, ICY keyword matching, ID3 frame content)
-- **Structured output** — indented JSON blocks + ANSI-colored summary lines, with three output modes (default, `--json`, `--quiet`)
+- **Ad classification engine** — classifies markers as AD_START, AD_END, or a fallback metadata state using protocol-specific rules (SCTE-35 command/descriptor types, ICY keyword matching, ID3 frame content)
+- **Structured output modes** — human-readable stdout, JSON stdout, quiet summaries, and optional JSON file output
 - **NDJSON file output** — `--json-out FILE` writes newline-delimited JSON alongside normal output
 - **Marker filtering** — `--filter TYPE` shows only scte35, id3, or icy markers
 - **Timeout support** — `--timeout N` stops after N seconds
