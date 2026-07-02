@@ -34,7 +34,7 @@ func TestParseFlags_FilterValidation(t *testing.T) {
 }
 
 func TestParseFlags_FilterValid(t *testing.T) {
-	for _, f := range []string{"scte35", "SCTE35", "icy", "ICY", "id3", "ID3"} {
+	for _, f := range []string{"scte35", "SCTE35", "icy", "ICY", "id3", "ID3", "fmp4", "FMP4"} {
 		_, _, _, cancel, err := parseFlags([]string{"--filter", f, "http://example.com"})
 		if err != nil {
 			t.Errorf("filter %q should be valid, got error: %v", f, err)
@@ -235,6 +235,8 @@ func TestShouldFilter(t *testing.T) {
 		{marker.MarkerSCTE35, "scte35", false},
 		{marker.MarkerID3, "id3", false},
 		{marker.MarkerID3, "icy", true},
+		{marker.MarkerFMP4, "fmp4", false},
+		{marker.MarkerFMP4, "id3", true},
 	}
 	for _, tt := range tests {
 		m := &marker.Marker{Type: tt.markerType}

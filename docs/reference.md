@@ -139,6 +139,12 @@ func ParseFromMPEGTS(data []byte) ([][]Tag, error)
 
 Each inner slice is one timed-ID3 event. This matters for HLS segments that contain multiple PES payloads with duplicate frame IDs; the segment decoder emits one marker per event instead of flattening the segment into one map.
 
+## fMP4/CMAF Behavior
+
+HLS playlists with `#EXT-X-MAP` are decoded as CMAF/fMP4 instead of MPEG-TS. The init segment provides track ID, handler, and timescale. Each media fragment's `moof` boxes provide timing from `tfhd`, `tfdt`, and `trun`.
+
+Fragment timing emits one `FMP4` marker per track with `Tag:"timeline"`, `PTS` in seconds, and fields for track ID, timescale, decode-time range, duration, sample count, and handler. In-band `emsg` boxes emit `FMP4` markers with `Tag:"emsg"` and event fields such as scheme ID URI, value, event ID, presentation time, duration, and message data.
+
 ## Resource Limits And Failure Modes
 
 - HLS manifest reads are capped at 1 MiB.
