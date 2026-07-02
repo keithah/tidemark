@@ -5,11 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-02
+
+### Added
+
+- Added fMP4/CMAF HLS segment parsing for playlists that use `#EXT-X-MAP`, including init-map track metadata, `moof`/`tfdt`/`trun` fragment timing, and `emsg` event messages.
+- Added compact `FMP4` timeline markers for CMAF track alignment and `FMP4` `emsg` markers for in-band metadata, including direct `.mp4a` audio playlist support.
+- Added `--filter fmp4`.
+
+### Fixed
+
+- CMAF `.mp4` and `.mp4a` HLS segments are no longer sent through the MPEG-TS decoder, avoiding false MPEG-TS decode errors on fMP4 streams.
+
 ## [0.3.2] - 2026-06-24
 
 ### Fixed
 
 - MPEGTS streams read over HTTP (and other network readers) no longer panic with `index out of range` when a read does not land on a 188-byte packet boundary. The decoder now carries the partial tail between reads and only parses whole, sync-aligned TS packets. ([#1](https://github.com/keithah/tidemark/issues/1))
+
+[0.4.0]: https://github.com/keithah/tidemark/releases/tag/v0.4.0
+[0.3.2]: https://github.com/keithah/tidemark/releases/tag/v0.3.2
 
 ## [0.3.1] - 2026-06-16
 

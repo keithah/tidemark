@@ -41,7 +41,7 @@ go install github.com/keithah/tidemark/cmd/tidemark@latest
 ## Usage
 
 ```bash
-# HLS: manifest SCTE-35 tags plus SCTE-35 and timed ID3 inside segments
+# HLS: manifest SCTE-35 tags plus SCTE-35, timed ID3, and fMP4/CMAF metadata
 tidemark https://example.com/live.m3u8
 
 # Icecast/SHOUTcast: ICY metadata
@@ -93,7 +93,7 @@ Classifications:
 | `--quiet` | Emit summary lines only. Mutually exclusive with `--json`. |
 | `--json-out FILE` | Write every marker as newline-delimited JSON to a file alongside normal output. |
 | `--timeout N` | Stop after N seconds. Default: 0, which runs until Ctrl+C or SIGTERM. |
-| `--filter TYPE` | Show only one marker type: `scte35`, `id3`, or `icy`. |
+| `--filter TYPE` | Show only one marker type: `scte35`, `id3`, `icy`, or `fmp4`. |
 | `--no-color` | Disable ANSI color codes in human-readable output. |
 
 ### Examples
