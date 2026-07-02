@@ -262,7 +262,7 @@ func (p *Poller) decodeSegments(ctx context.Context, jobs []segmentJob) <-chan s
 				defer wg.Done()
 				for job := range jobCh {
 					markers := make([]*marker.Marker, 0, 4)
-					err := p.segmentDecoder.Decode(ctx, job.url, job.sequence, func(m *marker.Marker) error {
+					err := p.segmentDecoder.Decode(ctx, job.url, job.mapURL, job.sequence, func(m *marker.Marker) error {
 						markers = append(markers, m)
 						return nil
 					})

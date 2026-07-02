@@ -103,7 +103,7 @@ func parseFlags(args []string) (*Config, string, context.Context, context.Cancel
 	fs.BoolVar(&cfg.Quiet, "quiet", false, "Summary lines only, suppress JSON blocks")
 	fs.StringVar(&cfg.JSONOut, "json-out", "", "Write all marker JSON to FILE (NDJSON)")
 	fs.IntVar(&cfg.Timeout, "timeout", 0, "Stop after N seconds (0=run until Ctrl+C)")
-	fs.StringVar(&cfg.Filter, "filter", "", "Only show markers of type: scte35 | id3 | icy")
+	fs.StringVar(&cfg.Filter, "filter", "", "Only show markers of type: scte35 | id3 | icy | fmp4")
 	fs.BoolVar(&cfg.Version, "version", false, "Print version and exit")
 
 	if err := fs.Parse(args); err != nil {
@@ -118,11 +118,11 @@ func parseFlags(args []string) (*Config, string, context.Context, context.Cancel
 	if cfg.Filter != "" {
 		cfg.Filter = strings.ToLower(cfg.Filter)
 		switch cfg.Filter {
-		case "scte35", "id3", "icy":
+		case "scte35", "id3", "icy", "fmp4":
 			cfg.HasFilter = true
 			cfg.FilterType = parseMarkerType(cfg.Filter)
 		default:
-			return nil, "", nil, func() {}, fmt.Errorf("--filter must be one of: scte35, id3, icy")
+			return nil, "", nil, func() {}, fmt.Errorf("--filter must be one of: scte35, id3, icy, fmp4")
 		}
 	}
 
@@ -190,6 +190,8 @@ func parseMarkerType(value string) marker.MarkerType {
 		return marker.MarkerID3
 	case "icy":
 		return marker.MarkerICY
+	case "fmp4":
+		return marker.MarkerFMP4
 	default:
 		return marker.MarkerSCTE35
 	}

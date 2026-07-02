@@ -43,6 +43,26 @@ segment43.ts
 	}
 }
 
+func TestParsePlaylistCarriesMapURIToSegments(t *testing.T) {
+	playlist := ParsePlaylist(`#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:10
+#EXT-X-MAP:URI="map.mp4a"
+#EXTINF:6.0,
+segment10.mp4a
+#EXTINF:6.0,
+segment11.mp4a
+`)
+	if len(playlist.Segments) != 2 {
+		t.Fatalf("segments = %d, want 2", len(playlist.Segments))
+	}
+	if playlist.Segments[0].MapURI != "map.mp4a" {
+		t.Fatalf("first map URI = %q, want map.mp4a", playlist.Segments[0].MapURI)
+	}
+	if playlist.Segments[1].MapURI != "map.mp4a" {
+		t.Fatalf("second map URI = %q, want map.mp4a", playlist.Segments[1].MapURI)
+	}
+}
+
 func TestPollIntervalUsesTargetDurationWhenDefault(t *testing.T) {
 	playlist := ParsePlaylist(`#EXTM3U
 #EXT-X-TARGETDURATION:6

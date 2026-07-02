@@ -18,6 +18,7 @@ type Playlist struct {
 type Segment struct {
 	Sequence int
 	URI      string
+	MapURI   string
 	Tags     []*TagResult
 }
 
@@ -27,6 +28,7 @@ func ParsePlaylist(body string) Playlist {
 	mediaSeq := 0
 	segIdx := 0
 	var pendingTags []*TagResult
+	var mapURI string
 	var playlist Playlist
 
 	for sc.Scan() {
@@ -53,6 +55,12 @@ func ParsePlaylist(body string) Playlist {
 			continue
 		}
 
+		if strings.HasPrefix(line, "#EXT-X-MAP:") {
+			attrs := parseAttributes(line[len("#EXT-X-MAP:"):])
+			mapURI = attrs["URI"]
+			continue
+		}
+
 		if tag := ParseLine(line); tag != nil {
 			pendingTags = append(pendingTags, tag)
 			continue
@@ -67,6 +75,7 @@ func ParsePlaylist(body string) Playlist {
 		playlist.Segments = append(playlist.Segments, Segment{
 			Sequence: mediaSeq + segIdx,
 			URI:      line,
+			MapURI:   mapURI,
 			Tags:     tags,
 		})
 		segIdx++

@@ -33,13 +33,17 @@ func (p *playlistPlanner) plan(manifestURL string, playlist Playlist) ([]segment
 	for _, segment := range playlist.Segments {
 		segURL := p.resolveSegmentURL(manifestURL, baseURL, segment.URI)
 		plan := segmentPlan{sequence: segment.Sequence, url: segURL}
+		mapURL := ""
+		if segment.MapURI != "" {
+			mapURL = p.resolveSegmentURL(manifestURL, baseURL, segment.MapURI)
+		}
 
 		if !p.tagSeen.Has(segURL) {
 			plan.tags = segment.Tags
 			p.tagSeen.Remember(segURL)
 		}
 		if _, ok := scheduled[segURL]; !ok && !p.segmentSeen.Has(segURL) {
-			jobs = append(jobs, segmentJob{sequence: segment.Sequence, url: segURL})
+			jobs = append(jobs, segmentJob{sequence: segment.Sequence, url: segURL, mapURL: mapURL})
 			plan.emitSegment = true
 			scheduled[segURL] = struct{}{}
 		}
@@ -72,6 +76,7 @@ type segmentPlan struct {
 type segmentJob struct {
 	sequence int
 	url      string
+	mapURL   string
 }
 
 type segmentResult struct {

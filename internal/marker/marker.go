@@ -38,6 +38,7 @@ const (
 	MarkerSCTE35 MarkerType = iota
 	MarkerICY
 	MarkerID3
+	MarkerFMP4
 )
 
 func (m MarkerType) String() string {
@@ -48,6 +49,8 @@ func (m MarkerType) String() string {
 		return "ICY"
 	case MarkerID3:
 		return "ID3"
+	case MarkerFMP4:
+		return "FMP4"
 	default:
 		return "Unknown"
 	}
