@@ -303,6 +303,9 @@ func TestParseFieldsStreamTitle(t *testing.T) {
 		{"StreamTitle='';", ""},
 		{"foo='bar';StreamTitle='Title';baz='qux';", "Title"},
 		{"NoTitle='here';", ""},
+		// Semicolons inside the quoted value must be preserved, not truncated.
+		{"StreamTitle='Song; feat. Artist';", "Song; feat. Artist"},
+		{"StreamTitle='A; B; C';StreamUrl='http://x';", "A; B; C"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {

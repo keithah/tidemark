@@ -4,20 +4,14 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/keithah/tidemark/internal/marker"
 )
 
-// icyAdKeywords are words that indicate an ad in ICY StreamTitle.
-var icyAdKeywords = map[string]struct{}{
-	"ad":         {},
-	"spot":       {},
-	"promo":      {},
-	"commercial": {},
-}
-
-// id3AdStartKeywords indicate ad start in ID3 frame content.
-var id3AdStartKeywords = map[string]struct{}{
+// adKeywords are whole-word tokens that indicate an ad start in ICY StreamTitle
+// and ID3 frame content.
+var adKeywords = map[string]struct{}{
 	"ad":         {},
 	"spot":       {},
 	"promo":      {},
@@ -59,7 +53,7 @@ func (c *Classifier) classifyICY(m *marker.Marker) marker.Classification {
 		return marker.Unknown
 	}
 
-	if containsKeywordToken(title, icyAdKeywords) {
+	if containsKeywordToken(title, adKeywords) {
 		c.inAd = true
 		return marker.AdStart
 	}
@@ -163,24 +157,34 @@ func classifySCTE35Rule(rule scte35Rule) marker.Classification {
 }
 
 func classifyID3(m *marker.Marker) marker.Classification {
-	// Check all tag values for ad keywords
+	// Scan every tag value and record which signals appear, then apply a fixed
+	// precedence. Returning on the first match while ranging m.Tags (a map with
+	// randomized iteration order) would classify a marker carrying both signals
+	// nondeterministically across runs.
+	sawEnd := false
+	sawStart := false
 	for _, value := range m.Tags {
 		lower := strings.ToLower(value)
-
-		// Check AD_END keywords first (ad_end contains "ad", so check before AD_START)
 		for _, kw := range id3AdEndKeywords {
-			if strings.Contains(lower, kw) {
-				return marker.AdEnd
+			if containsBoundedKeyword(lower, kw) {
+				sawEnd = true
 			}
 		}
-
-		// Check AD_START keywords using word boundary matching
-		if containsKeywordTokenNormalized(lower, id3AdStartKeywords) {
-			return marker.AdStart
+		if containsKeywordToken(lower, adKeywords) {
+			sawStart = true
 		}
 	}
 
-	return marker.Unknown
+	// AD_END wins over AD_START: its keywords (e.g. "ad_end") contain an
+	// AD_START token ("ad"), so an end signal must not be masked by it.
+	switch {
+	case sawEnd:
+		return marker.AdEnd
+	case sawStart:
+		return marker.AdStart
+	default:
+		return marker.Unknown
+	}
 }
 
 func containsKeywordToken(text string, keywords map[string]struct{}) bool {
@@ -206,25 +210,39 @@ func containsKeywordToken(text string, keywords map[string]struct{}) bool {
 	return ok
 }
 
-func containsKeywordTokenNormalized(text string, keywords map[string]struct{}) bool {
-	start := -1
-	for i, r := range text {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			if start < 0 {
-				start = i
-			}
-			continue
-		}
-		if start >= 0 {
-			if _, ok := keywords[text[start:i]]; ok {
-				return true
-			}
-			start = -1
-		}
-	}
-	if start < 0 {
+// containsBoundedKeyword reports whether kw appears in text delimited by
+// non-word characters (or string edges) on both sides. Unlike a plain
+// strings.Contains, "ad_end" does not match inside "sad_ending". kw itself may
+// contain non-word characters (e.g. the underscore in "ad_end"); only the
+// characters adjacent to the match are checked for boundaries.
+func containsBoundedKeyword(text, kw string) bool {
+	if kw == "" {
 		return false
 	}
-	_, ok := keywords[text[start:]]
-	return ok
+	for from := 0; from <= len(text)-len(kw); {
+		rel := strings.Index(text[from:], kw)
+		if rel < 0 {
+			return false
+		}
+		idx := from + rel
+		beforeOK := idx == 0
+		if !beforeOK {
+			r, _ := utf8.DecodeLastRuneInString(text[:idx])
+			beforeOK = !isWordRune(r)
+		}
+		afterOK := idx+len(kw) >= len(text)
+		if !afterOK {
+			r, _ := utf8.DecodeRuneInString(text[idx+len(kw):])
+			afterOK = !isWordRune(r)
+		}
+		if beforeOK && afterOK {
+			return true
+		}
+		from = idx + 1
+	}
+	return false
+}
+
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }

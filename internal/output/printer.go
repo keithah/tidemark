@@ -132,6 +132,12 @@ func tableRows(m *marker.Marker) []tableRow {
 			frame = "SCTE35"
 		}
 		return []tableRow{{frame: frame, value: summaryDetail(m)}}
+	case marker.MarkerFMP4:
+		frame := m.Tag
+		if frame == "" {
+			frame = "FMP4"
+		}
+		return []tableRow{{frame: frame, value: fmp4Detail(m)}}
 	}
 	return []tableRow{{value: summaryDetail(m)}}
 }
@@ -204,9 +210,49 @@ func summaryDetail(m *marker.Marker) string {
 			parts = append(parts, cleanSummaryText(k)+"="+cleanSummaryText(v))
 		}
 		return strings.Join(parts, "  ")
+	case marker.MarkerFMP4:
+		return fmp4Detail(m)
 	default:
 		return ""
 	}
+}
+
+// fmp4Detail renders an fMP4 timeline or emsg marker's fields in a stable order
+// so the default table and quiet modes are not blank for MarkerFMP4.
+func fmp4Detail(m *marker.Marker) string {
+	if len(m.Fields) == 0 {
+		return m.Tag
+	}
+	var preferred []string
+	switch m.Tag {
+	case "timeline":
+		preferred = []string{"track_id", "handler", "timescale", "duration_seconds", "sample_count"}
+	case "emsg":
+		preferred = []string{"scheme_id_uri", "value", "event_id", "presentation_time"}
+	}
+
+	parts := make([]string, 0, len(m.Fields))
+	seen := make(map[string]bool, len(m.Fields))
+	appendField := func(k string) {
+		if v, ok := m.Fields[k]; ok && v != "" {
+			parts = append(parts, cleanSummaryText(k)+"="+cleanSummaryText(v))
+		}
+		seen[k] = true
+	}
+	for _, k := range preferred {
+		appendField(k)
+	}
+	rest := make([]string, 0, len(m.Fields))
+	for k := range m.Fields {
+		if !seen[k] {
+			rest = append(rest, k)
+		}
+	}
+	sort.Strings(rest)
+	for _, k := range rest {
+		appendField(k)
+	}
+	return strings.Join(parts, "  ")
 }
 
 func cleanSummaryText(text string) string {

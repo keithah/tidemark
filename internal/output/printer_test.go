@@ -380,3 +380,42 @@ func TestJSONOutTruncatesExisting(t *testing.T) {
 		t.Error("should have truncated existing file")
 	}
 }
+
+func TestPrintFMP4RendersFields(t *testing.T) {
+	m := &marker.Marker{
+		Type:           marker.MarkerFMP4,
+		Classification: marker.Unknown,
+		Source:         "hls_fmp4",
+		Tag:            "timeline",
+		Segment:        3,
+		Fields: map[string]string{
+			"track_id":         "1",
+			"handler":          "vide",
+			"duration_seconds": "6",
+			"sample_count":     "150",
+		},
+		Timestamp: time.Now(),
+	}
+
+	// Default table mode must not leave FRAME/VALUE blank for fMP4 markers.
+	var table bytes.Buffer
+	if err := Print(&table, m, OutputConfig{Mode: ModeDefault, NoColor: true}); err != nil {
+		t.Fatalf("Print default: %v", err)
+	}
+	out := table.String()
+	if !strings.Contains(out, "timeline") {
+		t.Errorf("table output missing frame 'timeline': %q", out)
+	}
+	if !strings.Contains(out, "track_id=1") || !strings.Contains(out, "handler=vide") {
+		t.Errorf("table output missing fMP4 field values: %q", out)
+	}
+
+	// Quiet mode must include the detail, not an empty string.
+	var quiet bytes.Buffer
+	if err := Print(&quiet, m, OutputConfig{Mode: ModeQuiet, NoColor: true}); err != nil {
+		t.Fatalf("Print quiet: %v", err)
+	}
+	if !strings.Contains(quiet.String(), "track_id=1") {
+		t.Errorf("quiet output missing fMP4 detail: %q", quiet.String())
+	}
+}

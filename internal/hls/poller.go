@@ -100,11 +100,32 @@ func NewPoller(url string, opts ...Option) *Poller {
 func (p *Poller) Poll(ctx context.Context, ch chan<- *marker.Marker) error {
 	retryDelay := p.pollInterval
 
-	// Check if this is a master playlist and resolve to media playlist
-	resolved, err := p.resolveInitialManifest(ctx, p.url)
-	if err != nil {
-		return err
+	// Check if this is a master playlist and resolve to media playlist. Retry
+	// transient failures with backoff, matching the polling loop below, so a
+	// single startup blip does not kill the process.
+	var resolved resolvedManifest
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		var err error
+		resolved, err = p.resolveInitialManifest(ctx, p.url)
+		if err == nil {
+			break
+		}
+		var permanent permanentHTTPStatusError
+		if errors.As(err, &permanent) {
+			return err
+		}
+		p.reportf("resolve manifest: %v", err)
+		if waitErr := waitWithJitter(ctx, retryDelay); waitErr != nil {
+			return waitErr
+		}
+		retryDelay = nextRetryDelay(retryDelay)
 	}
+	retryDelay = p.pollInterval
 	manifestURL := resolved.url
 	initialBody := resolved.body
 	hasInitialBody := resolved.hasBody
@@ -118,6 +139,7 @@ func (p *Poller) Poll(ctx context.Context, ch chan<- *marker.Marker) error {
 
 		var endlist bool
 		var waitInterval time.Duration
+		var err error
 		if hasInitialBody {
 			endlist, waitInterval, err = p.processManifest(ctx, manifestURL, initialBody, ch)
 			hasInitialBody = false
@@ -156,6 +178,9 @@ func (p *Poller) resolveInitialManifest(ctx context.Context, manifestURL string)
 	}
 
 	sc := bufio.NewScanner(strings.NewReader(body))
+	// Allow lines up to the full manifest size; the default 64KB token cap would
+	// otherwise silently truncate a manifest with one very long line.
+	sc.Buffer(make([]byte, 0, 64*1024), MaxManifestBytes)
 	isMaster := false
 	for sc.Scan() {
 		line := sc.Text()
@@ -216,7 +241,7 @@ func (p *Poller) processManifest(ctx context.Context, manifestURL, body string, 
 							return err
 						}
 					}
-					p.planner.rememberDecodedSegment(plan.url)
+					p.planner.rememberDecodedSegment(result.seenKey)
 				}
 			}
 			nextPlan++
@@ -266,7 +291,7 @@ func (p *Poller) decodeSegments(ctx context.Context, jobs []segmentJob) <-chan s
 						markers = append(markers, m)
 						return nil
 					})
-					result := segmentResult{url: job.url, markers: markers, err: err}
+					result := segmentResult{url: job.url, seenKey: job.seenKey, markers: markers, err: err}
 					select {
 					case <-ctx.Done():
 						return

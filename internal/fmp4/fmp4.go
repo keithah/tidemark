@@ -87,42 +87,58 @@ func ParseInit(data []byte) (InitInfo, error) {
 // ParseFragment extracts decode timing for samples in a media fragment.
 func ParseFragment(init InitInfo, data []byte) (FragmentTiming, error) {
 	var timing FragmentTiming
-	for _, event := range boxesOfType(data, "emsg") {
-		if parsed, ok := parseEMSG(event.payload); ok {
-			timing.Events = append(timing.Events, parsed)
-		}
-	}
-	for _, moof := range boxesOfType(data, "moof") {
-		for _, event := range boxesOfType(moof.payload, "emsg") {
-			if parsed, ok := parseEMSG(event.payload); ok {
+	for _, box := range parseBoxes(data) {
+		switch box.typ {
+		case "emsg":
+			if parsed, ok := parseEMSG(box.payload); ok {
 				timing.Events = append(timing.Events, parsed)
 			}
-		}
-		for _, traf := range boxesOfType(moof.payload, "traf") {
-			frag := parseTraf(traf.payload)
-			track := init.Tracks[frag.trackID]
-			if frag.trackID == 0 || track.Timescale == 0 {
-				continue
-			}
-			if len(frag.durations) == 0 && frag.defaultSampleDuration > 0 && frag.sampleCount > 0 {
-				frag.durations = make([]uint32, frag.sampleCount)
-				for i := range frag.durations {
-					frag.durations[i] = frag.defaultSampleDuration
+		case "moof":
+			for _, child := range parseBoxes(box.payload) {
+				switch child.typ {
+				case "emsg":
+					if parsed, ok := parseEMSG(child.payload); ok {
+						timing.Events = append(timing.Events, parsed)
+					}
+				case "traf":
+					timing.Samples = append(timing.Samples, parseTrafSamples(init, child.payload, len(data))...)
 				}
-			}
-			decodeTime := frag.baseDecodeTime
-			for _, duration := range frag.durations {
-				timing.Samples = append(timing.Samples, SampleTiming{
-					TrackID:      frag.trackID,
-					DecodeTime:   decodeTime,
-					Duration:     duration,
-					StartSeconds: float64(decodeTime) / float64(track.Timescale),
-				})
-				decodeTime += uint64(duration)
 			}
 		}
 	}
 	return timing, nil
+}
+
+func parseTrafSamples(init InitInfo, data []byte, fragmentSize int) []SampleTiming {
+	frag := parseTraf(data)
+	track := init.Tracks[frag.trackID]
+	if frag.trackID == 0 || track.Timescale == 0 {
+		return nil
+	}
+	// Synthesize per-sample durations from the track default when the trun
+	// carried none. sampleCount is an untrusted 32-bit field; a fragment can
+	// declare at most one sample per byte of media data, so reject counts larger
+	// than the fragment itself rather than allocating from the raw value.
+	if len(frag.durations) == 0 && frag.defaultSampleDuration > 0 &&
+		frag.sampleCount > 0 && frag.sampleCount <= fragmentSize {
+		frag.durations = make([]uint32, frag.sampleCount)
+		for i := range frag.durations {
+			frag.durations[i] = frag.defaultSampleDuration
+		}
+	}
+
+	samples := make([]SampleTiming, 0, len(frag.durations))
+	decodeTime := frag.baseDecodeTime
+	for _, duration := range frag.durations {
+		samples = append(samples, SampleTiming{
+			TrackID:      frag.trackID,
+			DecodeTime:   decodeTime,
+			Duration:     duration,
+			StartSeconds: float64(decodeTime) / float64(track.Timescale),
+		})
+		decodeTime += uint64(duration)
+	}
+	return samples
 }
 
 func parseEMSG(data []byte) (EventMessage, bool) {
@@ -207,12 +223,12 @@ func parseTrack(data []byte) (trackBuilder, bool) {
 	for _, child := range parseBoxes(data) {
 		switch child.typ {
 		case "tkhd":
-			track.id = parseTKHDTrackID(child.payload)
+			track.id = parseVersionedUint32(child.payload)
 		case "mdia":
 			for _, mdiaChild := range parseBoxes(child.payload) {
 				switch mdiaChild.typ {
 				case "mdhd":
-					track.timescale = parseMDHDTimescale(mdiaChild.payload)
+					track.timescale = parseVersionedUint32(mdiaChild.payload)
 				case "hdlr":
 					track.handler = parseHDLRHandler(mdiaChild.payload)
 				}
@@ -237,26 +253,14 @@ func parseTraf(data []byte) trafBuilder {
 	return frag
 }
 
-func parseTKHDTrackID(data []byte) uint32 {
+// parseVersionedUint32 reads a big-endian uint32 that both tkhd (track ID) and
+// mdhd (timescale) place at offset 12 in their version-0 layout and offset 20
+// in version 1. The two boxes share this full-box header layout exactly.
+func parseVersionedUint32(data []byte) uint32 {
 	if len(data) < 16 {
 		return 0
 	}
-	version := data[0]
-	if version == 1 {
-		if len(data) < 28 {
-			return 0
-		}
-		return binary.BigEndian.Uint32(data[20:24])
-	}
-	return binary.BigEndian.Uint32(data[12:16])
-}
-
-func parseMDHDTimescale(data []byte) uint32 {
-	if len(data) < 16 {
-		return 0
-	}
-	version := data[0]
-	if version == 1 {
+	if version := data[0]; version == 1 {
 		if len(data) < 28 {
 			return 0
 		}
@@ -321,7 +325,18 @@ func parseTRUN(data []byte) (int, []uint32) {
 	if flags&0x000100 == 0 {
 		return sampleCount, nil
 	}
-	durations := make([]uint32, 0, sampleCount)
+	// Cap the preallocated capacity by the bytes actually available: each entry
+	// consumes at least 4 bytes, so sampleCount can never exceed len(data)/4 here.
+	// This prevents a bogus sampleCount from forcing a huge allocation before the
+	// bounded read loop runs.
+	capHint := sampleCount
+	if maxEntries := (len(data) - offset) / 4; capHint > maxEntries {
+		capHint = maxEntries
+	}
+	if capHint < 0 {
+		capHint = 0
+	}
+	durations := make([]uint32, 0, capHint)
 	for i := 0; i < sampleCount && offset+4 <= len(data); i++ {
 		durations = append(durations, binary.BigEndian.Uint32(data[offset:offset+4]))
 		offset += 4
@@ -359,6 +374,10 @@ func parseBoxes(data []byte) []boxHeader {
 			}
 			size = binary.BigEndian.Uint64(data[8:16])
 			headerSize = 16
+		} else if size == 0 {
+			// size==0 means "box extends to the end of the enclosure" (ISO
+			// 14496-12 §4.2), legal for the last top-level box.
+			size = uint64(len(data))
 		}
 		if size < headerSize || size > uint64(len(data)) {
 			break

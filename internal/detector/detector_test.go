@@ -2,6 +2,7 @@ package detector
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -111,6 +112,45 @@ func TestDetectUnknown(t *testing.T) {
 	}
 }
 
+func TestDetectSniffsHLSBodyWhenHeadersAreAmbiguous(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		if r.Method == http.MethodGet {
+			w.Write([]byte("#EXTM3U\n#EXT-X-TARGETDURATION:6\n"))
+		}
+	}))
+	defer srv.Close()
+
+	result, err := Detect(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("Detect error: %v", err)
+	}
+	if result.Type != marker.StreamHLS {
+		t.Fatalf("Type = %s, want HLS", result.Type)
+	}
+}
+
+func TestDetectSniffsMPEGTSBodyWhenHeadersAreAmbiguous(t *testing.T) {
+	packet := make([]byte, 188*2)
+	packet[0] = 0x47
+	packet[188] = 0x47
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		if r.Method == http.MethodGet {
+			w.Write(packet)
+		}
+	}))
+	defer srv.Close()
+
+	result, err := Detect(context.Background(), srv.URL)
+	if err != nil {
+		t.Fatalf("Detect error: %v", err)
+	}
+	if result.Type != marker.StreamMPEGTS {
+		t.Fatalf("Type = %s, want MPEGTS", result.Type)
+	}
+}
+
 func TestDetectUsesHEADForHeaderProbe(t *testing.T) {
 	var method string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -199,5 +239,9 @@ func TestHTTPGetRejectsNonOKStatus(t *testing.T) {
 			resp.Body.Close()
 		}
 		t.Fatal("expected non-OK status error")
+	}
+	var perr interface{ Permanent() bool }
+	if !errors.As(err, &perr) || !perr.Permanent() {
+		t.Fatalf("HTTPGet 4xx error = %T, want permanent error", err)
 	}
 }

@@ -118,10 +118,11 @@ func TestMarkerFromCueNil(t *testing.T) {
 }
 
 func TestDecodeHexPayload(t *testing.T) {
-	// Hex-encoded version of the splice null payload
-	// cuei's hex decode is broken, so we pre-convert to base64
-	// The payload is /DARAAAAAAAAAP/wAAAAAHpPGuQ= in base64
-	// In hex: fc3011000000000000000000fff00000000007a4f1ae4
-	// Skip this test if cuei can't handle the particular payload
-	t.Skip("cuei hex decode path is broken — hex→b64 conversion handles this in production")
+	m, err := Decode("0xfc301100000000000000fff0000000007a4f1ae4", "test", "")
+	if err != nil {
+		t.Fatalf("Decode hex error: %v", err)
+	}
+	if m.Fields["CommandName"] != "Splice Null" {
+		t.Fatalf("CommandName = %q, want Splice Null", m.Fields["CommandName"])
+	}
 }

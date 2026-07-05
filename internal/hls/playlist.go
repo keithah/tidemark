@@ -25,6 +25,10 @@ type Segment struct {
 // ParsePlaylist parses the media playlist structure needed for marker polling.
 func ParsePlaylist(body string) Playlist {
 	sc := bufio.NewScanner(strings.NewReader(body))
+	// Allow lines up to the full manifest size; the default 64KB token cap would
+	// otherwise silently truncate parsing at a long line (e.g. a large
+	// EXT-X-DATERANGE payload), dropping later segments and EXT-X-ENDLIST.
+	sc.Buffer(make([]byte, 0, 64*1024), MaxManifestBytes)
 	mediaSeq := 0
 	segIdx := 0
 	var pendingTags []*TagResult
@@ -79,6 +83,15 @@ func ParsePlaylist(body string) Playlist {
 			Tags:     tags,
 		})
 		segIdx++
+	}
+
+	// Tags after the last segment URI (e.g. a trailing EXT-X-CUE-IN before
+	// EXT-X-ENDLIST) have no following segment to attach to. Fold them onto the
+	// last segment so their markers are still emitted; otherwise an ad break that
+	// closes at end of playlist would never emit its AdEnd.
+	if len(pendingTags) > 0 && len(playlist.Segments) > 0 {
+		last := &playlist.Segments[len(playlist.Segments)-1]
+		last.Tags = append(last.Tags, pendingTags...)
 	}
 
 	return playlist

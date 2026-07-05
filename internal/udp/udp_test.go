@@ -2,20 +2,34 @@ package udp
 
 import (
 	"context"
+	"errors"
 	"net"
+	"sync"
 	"testing"
+
 	"github.com/keithah/tidemark/internal/marker"
 )
 
-func tryMulticastListen(t *testing.T) {
-	t.Helper()
-	addr := &net.UDPAddr{IP: net.ParseIP("239.0.0.1"), Port: 0}
-	conn, err := net.ListenMulticastUDP("udp4", nil, addr)
-	if err != nil {
-		t.Skipf("multicast not available: %v", err)
-	}
-	conn.Close()
+type fakeUDPConn struct {
+	closed chan struct{}
+	once   sync.Once
 }
+
+func newFakeUDPConn() *fakeUDPConn {
+	return &fakeUDPConn{closed: make(chan struct{})}
+}
+
+func (c *fakeUDPConn) Read([]byte) (int, error) {
+	<-c.closed
+	return 0, net.ErrClosed
+}
+
+func (c *fakeUDPConn) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return nil
+}
+
+func (c *fakeUDPConn) SetReadBuffer(int) error { return nil }
 
 func TestParseUDPAddr(t *testing.T) {
 	tests := []struct {
@@ -52,10 +66,12 @@ func TestParseUDPAddr(t *testing.T) {
 }
 
 func TestReadContextCancellation(t *testing.T) {
-	tryMulticastListen(t)
-
 	ctx, cancel := context.WithCancel(context.Background())
+	fake := newFakeUDPConn()
 	r := NewReader("udp://@239.0.0.1:9999")
+	r.listen = func(string, *net.Interface, *net.UDPAddr) (udpConn, error) {
+		return fake, nil
+	}
 	ch := make(chan *marker.Marker, 10)
 
 	done := make(chan error, 1)
@@ -65,8 +81,20 @@ func TestReadContextCancellation(t *testing.T) {
 
 	cancel()
 	err := <-done
-	if err != nil && err != context.Canceled {
-		t.Logf("got error: %v (acceptable)", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Read error = %v, want context.Canceled", err)
+	}
+}
+
+func TestReadInvalidAddressIsPermanent(t *testing.T) {
+	r := NewReader("bad-address")
+	err := r.Read(context.Background(), make(chan *marker.Marker, 1))
+	if err == nil {
+		t.Fatal("expected invalid address error")
+	}
+	var perr interface{ Permanent() bool }
+	if !errors.As(err, &perr) || !perr.Permanent() {
+		t.Fatalf("Read error = %T, want permanent error", err)
 	}
 }
 
@@ -82,10 +110,12 @@ func TestNewReader(t *testing.T) {
 
 func TestReadDoesNotCloseChannel(t *testing.T) {
 	// Verify that Read does not close the channel — caller manages lifecycle
-	tryMulticastListen(t)
-
 	ctx, cancel := context.WithCancel(context.Background())
+	fake := newFakeUDPConn()
 	r := NewReader("udp://@239.0.0.1:9998")
+	r.listen = func(string, *net.Interface, *net.UDPAddr) (udpConn, error) {
+		return fake, nil
+	}
 	ch := make(chan *marker.Marker, 10)
 
 	done := make(chan error, 1)

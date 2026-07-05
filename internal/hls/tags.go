@@ -28,6 +28,10 @@ func ParseLine(line string) *TagResult {
 		return parseOATCLSTag(line)
 	case strings.HasPrefix(line, "#EXT-X-DATERANGE:"):
 		return parseDateRangeTag(line)
+	case strings.HasPrefix(line, "#EXT-X-CUE-OUT-CONT"):
+		// Continuation tag repeated on every segment inside a break; it is not a
+		// new ad start, so ignore it (checked before the CUE-OUT prefix below).
+		return nil
 	case strings.HasPrefix(line, "#EXT-X-CUE-OUT"):
 		return parseCueOutTag(line)
 	case strings.HasPrefix(line, "#EXT-X-CUE-IN"):

@@ -187,3 +187,24 @@ func TestParseAttributes(t *testing.T) {
 		t.Errorf("TITLE = %q, want 'Hello, World'", attrs["TITLE"])
 	}
 }
+
+func TestParseLineCueOutContIsNotAdStart(t *testing.T) {
+	t.Parallel()
+	// Continuation tags repeat on every segment within a break; they must not be
+	// parsed as a fresh CUE-OUT (which would emit a spurious AD_START per segment).
+	for _, line := range []string{
+		"#EXT-X-CUE-OUT-CONT:ElapsedTime=8,Duration=30",
+		"#EXT-X-CUE-OUT-CONT:2.002/30.0",
+		"#EXT-X-CUE-OUT-CONT",
+	} {
+		if r := ParseLine(line); r != nil {
+			t.Errorf("ParseLine(%q) = %+v, want nil (continuation is not an ad start)", line, r)
+		}
+	}
+
+	// A real CUE-OUT is still recognized as an ad start.
+	r := ParseLine("#EXT-X-CUE-OUT:DURATION=30")
+	if r == nil || !r.IsDirect || r.DirectType != marker.AdStart {
+		t.Fatalf("ParseLine CUE-OUT = %+v, want direct AdStart", r)
+	}
+}

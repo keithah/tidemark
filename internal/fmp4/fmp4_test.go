@@ -166,3 +166,54 @@ func u64(v uint64) []byte {
 	binary.BigEndian.PutUint64(out, v)
 	return out
 }
+
+func TestParseFragmentRejectsHugeSampleCount(t *testing.T) {
+	init := InitInfo{Tracks: map[uint32]TrackInfo{
+		7: {ID: 7, Timescale: 48000, Handler: "soun"},
+	}}
+
+	// trun declares 0xFFFFFFFF samples with no per-sample durations, plus a tfhd
+	// default duration. A naive make([]uint32, sampleCount) would attempt ~16GB;
+	// the guard must refuse to synthesize durations from a count larger than the
+	// fragment itself instead of allocating (or panicking).
+	fragment := box("moof",
+		box("traf",
+			box("tfhd", full(0x000008, u32(7), u32(1024))),
+			box("tfdt", full(0x01000000, u64(96000))),
+			box("trun", full(0, u32(0xFFFFFFFF))),
+		),
+	)
+
+	timing, err := ParseFragment(init, fragment)
+	if err != nil {
+		t.Fatalf("ParseFragment error = %v", err)
+	}
+	if len(timing.Samples) != 0 {
+		t.Fatalf("samples = %d, want 0 (implausible sample count rejected)", len(timing.Samples))
+	}
+}
+
+func TestParseFragmentBoundsPerSampleCapacity(t *testing.T) {
+	init := InitInfo{Tracks: map[uint32]TrackInfo{
+		7: {ID: 7, Timescale: 48000, Handler: "soun"},
+	}}
+
+	// Per-sample durations flag is set with a huge sampleCount, but the box only
+	// carries one duration entry. The read loop is bounded by the box length and
+	// the preallocated capacity must not be driven by the raw count.
+	fragment := box("moof",
+		box("traf",
+			box("tfhd", full(0, u32(7))),
+			box("tfdt", full(0x01000000, u64(0))),
+			box("trun", full(0x000100, u32(0xFFFFFFFF), u32(1024))),
+		),
+	)
+
+	timing, err := ParseFragment(init, fragment)
+	if err != nil {
+		t.Fatalf("ParseFragment error = %v", err)
+	}
+	if len(timing.Samples) != 1 {
+		t.Fatalf("samples = %d, want 1 (bounded by box length)", len(timing.Samples))
+	}
+}

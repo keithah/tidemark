@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -62,6 +63,15 @@ func (r *Reader) Read(ctx context.Context, ch chan<- *marker.Marker) error {
 		httpclient.DrainAndClose(resp.Body)
 		return fmt.Errorf("connect: status %d", resp.StatusCode)
 	}
+	// Prefer the interval advertised on this streaming GET: HEAD probing (used by
+	// the detector) may miss or disagree with icy-metaint, and trusting a stale
+	// value permanently desyncs metadata framing.
+	if v := resp.Header.Get("icy-metaint"); v != "" {
+		if n, convErr := strconv.Atoi(strings.TrimSpace(v)); convErr == nil && n > 0 {
+			r.metaInt = n
+		}
+	}
+
 	resp.Body = httpclient.WithIdleReadTimeout(resp.Body, httpclient.DefaultIdleReadTimeout)
 	defer func() { _ = resp.Body.Close() }()
 
@@ -176,25 +186,43 @@ func sanitize(data []byte) string {
 	return b.String()
 }
 
-// parseFields parses ICY metadata into a map of key=value pairs.
+// parseFields parses ICY metadata into a map of key=value pairs. Field
+// separators (';') inside single-quoted values are preserved, so a StreamTitle
+// containing a semicolon is not truncated.
 func parseFields(meta string) map[string]string {
 	fields := make(map[string]string, strings.Count(meta, ";")+1)
-	for {
-		part, rest, found := strings.Cut(meta, ";")
-		part = strings.TrimSpace(part)
-		if part != "" {
-			key, val, ok := strings.Cut(part, "=")
-			if ok {
-				if len(val) >= 2 && val[0] == '\'' && val[len(val)-1] == '\'' {
-					val = val[1 : len(val)-1]
-				}
-				fields[key] = val
-			}
-		}
-		if !found {
-			break
-		}
+	for len(meta) > 0 {
+		part, rest := cutFieldOutsideQuotes(meta)
 		meta = rest
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, val, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		if len(val) >= 2 && val[0] == '\'' && val[len(val)-1] == '\'' {
+			val = val[1 : len(val)-1]
+		}
+		fields[strings.TrimSpace(key)] = val
 	}
 	return fields
+}
+
+// cutFieldOutsideQuotes splits meta at the first ';' that is not inside a
+// single-quoted value, returning the field and the remainder.
+func cutFieldOutsideQuotes(meta string) (field, rest string) {
+	inQuote := false
+	for i := 0; i < len(meta); i++ {
+		switch meta[i] {
+		case '\'':
+			inQuote = !inQuote
+		case ';':
+			if !inQuote {
+				return meta[:i], meta[i+1:]
+			}
+		}
+	}
+	return meta, ""
 }

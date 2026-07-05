@@ -309,56 +309,6 @@ func TestParseMultipleTags(t *testing.T) {
 	}
 }
 
-func TestScannerParsesTagAcrossChunkBoundaries(t *testing.T) {
-	frame := buildFrame("TIT2", 3, []byte{0x00, 'S', 't', 'r', 'e', 'a', 'm'})
-	tag := buildTag(3, frame)
-	data := append([]byte("prefix"), tag...)
-	data = append(data, []byte("suffix")...)
-
-	scanner := NewScanner(1024)
-	var tags []Tag
-	for _, chunkSize := range []int{3, 2, 5, 1, 4, 8, 64} {
-		if len(data) == 0 {
-			break
-		}
-		if chunkSize > len(data) {
-			chunkSize = len(data)
-		}
-		got, err := scanner.Write(data[:chunkSize])
-		if err != nil {
-			t.Fatalf("Write: %v", err)
-		}
-		tags = append(tags, got...)
-		data = data[chunkSize:]
-	}
-	got, err := scanner.Flush()
-	if err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-	tags = append(tags, got...)
-
-	if len(tags) != 1 {
-		t.Fatalf("tags = %d, want 1", len(tags))
-	}
-	if tags[0].ID != "TIT2" || tags[0].Value != "Stream" {
-		t.Fatalf("tag = {%s %q}, want {TIT2 Stream}", tags[0].ID, tags[0].Value)
-	}
-}
-
-func TestScannerRejectsOversizedTag(t *testing.T) {
-	frame := buildFrame("TIT2", 3, bytes.Repeat([]byte{'x'}, 32))
-	tag := buildTag(3, frame)
-
-	scanner := NewScanner(8)
-	_, err := scanner.Write(tag)
-	if err == nil {
-		t.Fatal("expected oversized tag error")
-	}
-	if !strings.Contains(err.Error(), "ID3 tag too large") {
-		t.Fatalf("error = %q, want ID3 tag too large", err.Error())
-	}
-}
-
 func TestParseSynchsafe(t *testing.T) {
 	// Test synchsafe decoding directly
 	got := decodeSynchsafe([]byte{0x00, 0x00, 0x02, 0x01}) // 0*2^21 + 0*2^14 + 2*2^7 + 1 = 257
@@ -592,5 +542,50 @@ func TestParseFromMPEGTSNonID3PES(t *testing.T) {
 	}
 	if len(groups) != 0 {
 		t.Errorf("expected 0 groups from non-ID3 PES, got %d: %v", len(groups), groups)
+	}
+}
+
+func TestMPEGTSExtractorDropsNonID3PESAfterProbe(t *testing.T) {
+	tsData := buildMPEGTSSegment(0x0100, bytes.Repeat([]byte("A"), 512))
+	var extractor MPEGTSExtractor
+	for i := 0; i+188 <= len(tsData); i += 188 {
+		extractor.PushPacket(tsData[i : i+188])
+		if len(extractor.bufs) != 0 {
+			t.Fatalf("non-ID3 PES still buffered after packet %d", i/188)
+		}
+	}
+}
+
+func TestParseV23ExtendedHeaderSkippedCorrectly(t *testing.T) {
+	// An ID3v2.3 tag whose extended-header size field (6) excludes its own 4
+	// size bytes. The parser must advance frameStart by 4+6=10 to reach the
+	// first frame; a naive += extSize lands 4 bytes short and drops every frame.
+	frame := buildFrame("TIT2", 3, []byte{0x00, 'H', 'i'})
+
+	extSize := make([]byte, 4)
+	binary.BigEndian.PutUint32(extSize, 6)                   // v2.3: excludes these 4 bytes
+	extContent := []byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x00} // flags(2) + padding size(4)
+	body := append(append(extSize, extContent...), frame...)
+
+	header := make([]byte, 10)
+	copy(header[:3], "ID3")
+	header[3] = 3    // v2.3
+	header[5] = 0x40 // extended header present
+	size := len(body)
+	header[6] = byte((size >> 21) & 0x7F)
+	header[7] = byte((size >> 14) & 0x7F)
+	header[8] = byte((size >> 7) & 0x7F)
+	header[9] = byte(size & 0x7F)
+	tag := append(header, body...)
+
+	tags, err := Parse(tag)
+	if err != nil {
+		t.Fatalf("Parse error = %v", err)
+	}
+	if len(tags) != 1 {
+		t.Fatalf("tags = %d, want 1 (frame after extended header must be found)", len(tags))
+	}
+	if tags[0].ID != "TIT2" || tags[0].Value != "Hi" {
+		t.Fatalf("tag = {%s %q}, want {TIT2 Hi}", tags[0].ID, tags[0].Value)
 	}
 }

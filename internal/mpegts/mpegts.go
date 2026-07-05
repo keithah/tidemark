@@ -8,6 +8,7 @@ import (
 
 	"github.com/futzu/cuei"
 
+	"github.com/keithah/tidemark/internal/id3"
 	"github.com/keithah/tidemark/internal/marker"
 	"github.com/keithah/tidemark/internal/pipeline"
 	"github.com/keithah/tidemark/internal/scte35"
@@ -22,6 +23,12 @@ const tsSyncByte = 0x47
 // Decoder wraps cuei.Stream for MPEGTS SCTE-35 decoding.
 type Decoder struct {
 	stream *cuei.Stream
+}
+
+// SegmentResult contains all metadata extracted from one MPEG-TS segment.
+type SegmentResult struct {
+	SCTE35 []*marker.Marker
+	ID3    [][]id3.Tag
 }
 
 // NewDecoder creates a new MPEGTS decoder.
@@ -55,6 +62,72 @@ func (d *Decoder) DecodeBuf(data []byte) (markers []*marker.Marker, err error) {
 	}
 
 	return markers, nil
+}
+
+// DecodeSegment extracts SCTE-35 and timed-ID3 markers from one segment. For
+// non-TS inputs it skips SCTE-35 decoding and falls back to raw ID3 parsing.
+func (d *Decoder) DecodeSegment(data []byte) (SegmentResult, error) {
+	packets, _ := alignPackets(data)
+	if len(packets) == 0 {
+		groups, err := id3.ParseFromMPEGTS(data)
+		return SegmentResult{ID3: groups}, err
+	}
+
+	markers, err := d.DecodeBuf(packets)
+	if err != nil {
+		return SegmentResult{}, err
+	}
+	return SegmentResult{
+		SCTE35: markers,
+		ID3:    mustParseID3FromMPEGTS(packets),
+	}, nil
+}
+
+// DecodeSegmentReader streams one finite MPEG-TS segment and extracts SCTE-35
+// plus timed ID3 without buffering the whole segment first.
+func (d *Decoder) DecodeSegmentReader(ctx context.Context, r io.Reader) (SegmentResult, error) {
+	buf := make([]byte, tsPacketSize*350)
+	var leftover []byte
+	var extractor id3.MPEGTSExtractor
+	var result SegmentResult
+
+	for {
+		select {
+		case <-ctx.Done():
+			return SegmentResult{}, ctx.Err()
+		default:
+		}
+
+		n, err := r.Read(buf)
+		if n > 0 {
+			data := buf[:n]
+			if len(leftover) > 0 {
+				data = append(leftover, data...)
+			}
+			packets, rest := alignPackets(data)
+			leftover = append(leftover[:0], rest...)
+			if len(packets) > 0 {
+				for i := 0; i+tsPacketSize <= len(packets); i += tsPacketSize {
+					extractor.PushPacket(packets[i : i+tsPacketSize])
+				}
+				markers, derr := d.DecodeBuf(packets)
+				if derr != nil {
+					return SegmentResult{}, derr
+				}
+				result.SCTE35 = append(result.SCTE35, markers...)
+			}
+		}
+		if err == io.EOF {
+			result.ID3 = extractor.Groups()
+			return result, nil
+		}
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return SegmentResult{}, ctxErr
+			}
+			return SegmentResult{}, fmt.Errorf("read: %w", err)
+		}
+	}
 }
 
 // DecodeReader reads from an io.Reader in chunks and decodes SCTE-35.
@@ -121,15 +194,37 @@ func (d *Decoder) DecodeReader(ctx context.Context, r io.Reader, ch chan<- *mark
 // skips any bytes before the first sync byte so a stream that starts (or drifts)
 // off a packet boundary can resynchronize.
 func alignPackets(data []byte) (packets, rest []byte) {
-	start := bytes.IndexByte(data, tsSyncByte)
-	if start < 0 {
-		// No sync byte in this buffer; nothing to decode and nothing worth
-		// carrying forward.
-		return nil, nil
+	for search := 0; search < len(data); {
+		rel := bytes.IndexByte(data[search:], tsSyncByte)
+		if rel < 0 {
+			// No sync byte left; nothing to decode and nothing worth carrying.
+			return nil, nil
+		}
+		start := search + rel
+		candidate := data[start:]
+
+		// When a following packet boundary is available, require it to also hold
+		// a sync byte before committing to this offset. Otherwise a stray 0x47 in
+		// packet payload can lock the decoder onto a false phase, so that every
+		// subsequent 188-byte "packet" is garbage and cuei misparses (or panics,
+		// which DecodeReader surfaces as a fatal error) with no way to resync.
+		if len(candidate) >= 2*tsPacketSize && candidate[tsPacketSize] != tsSyncByte {
+			search = start + 1
+			continue
+		}
+
+		full := (len(candidate) / tsPacketSize) * tsPacketSize
+		return candidate[:full], candidate[full:]
 	}
-	data = data[start:]
-	full := (len(data) / tsPacketSize) * tsPacketSize
-	return data[:full], data[full:]
+	return nil, nil
+}
+
+func mustParseID3FromMPEGTS(data []byte) [][]id3.Tag {
+	groups, err := id3.ParseFromMPEGTS(data)
+	if err != nil {
+		return nil
+	}
+	return groups
 }
 
 func closeOnCancel(ctx context.Context, r io.Reader) func() {

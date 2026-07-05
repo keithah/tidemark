@@ -95,3 +95,28 @@ func TestFetchManifestRejectsOversizedBody(t *testing.T) {
 		t.Fatalf("error = %q, want manifest too large", err.Error())
 	}
 }
+
+func TestParsePlaylistKeepsTrailingTags(t *testing.T) {
+	// A CUE-IN after the last segment (before ENDLIST) has no following segment
+	// URI; it must still be attached so the AD_END is emitted at end of playlist.
+	playlist := ParsePlaylist(`#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:6.0,
+segment0.ts
+#EXT-X-CUE-IN
+#EXT-X-ENDLIST
+`)
+	if len(playlist.Segments) != 1 {
+		t.Fatalf("segments = %d, want 1", len(playlist.Segments))
+	}
+	tags := playlist.Segments[0].Tags
+	found := false
+	for _, tag := range tags {
+		if tag.Tag == "#EXT-X-CUE-IN" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("trailing CUE-IN dropped; segment tags = %#v", tags)
+	}
+}

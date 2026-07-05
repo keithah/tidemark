@@ -60,6 +60,23 @@ func (m MarkerType) MarshalJSON() ([]byte, error) {
 	return strconv.AppendQuote(nil, m.String()), nil
 }
 
+// ParseType maps a lowercase filter name to its MarkerType.
+// It is the single source of truth for the set of selectable marker types.
+func ParseType(name string) (MarkerType, bool) {
+	switch name {
+	case "scte35":
+		return MarkerSCTE35, true
+	case "icy":
+		return MarkerICY, true
+	case "id3":
+		return MarkerID3, true
+	case "fmp4":
+		return MarkerFMP4, true
+	default:
+		return 0, false
+	}
+}
+
 // Classification identifies the ad transition type.
 type Classification int
 

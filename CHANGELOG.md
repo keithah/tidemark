@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-07-05
+
+### Fixed
+
+- Hardened fMP4 `trun` parsing against hostile sample counts that could force excessive allocation.
+- Fixed HLS `#EXT-X-CUE-OUT-CONT` handling so continuation tags no longer emit spurious ad-start markers.
+- Added timeouts around HLS fMP4 init-map fetches so stalled init bodies cannot wedge polling.
+- Fixed clean exits for wrapped context cancellation/deadline errors and `-h`.
+- Restored fMP4 marker details in table and quiet output.
+- Fixed ID3v2.3 extended-header parsing and tightened ID3 synchsafe validation.
+- Made ID3 ad-end classification deterministic and boundary-aware.
+- Preserved quoted semicolons in ICY metadata titles and refreshed ICY metaint from the streaming response.
+- Retried transient initial HLS manifest fetch failures with backoff.
+- Preserved trailing HLS manifest tags, including late tags appended to an already-seen live segment.
+- Removed the manifest scanner's silent 64 KB line cap.
+- Reduced MPEG-TS false sync-locks by validating the next packet boundary before committing to an offset.
+- Marked permanent source/configuration errors as non-retryable while keeping transient source failures retryable.
+
+### Changed
+
+- Increased UDP read buffers to handle full-size datagrams without silent truncation.
+- Kept data-bearing reads from being masked by idle-timeout errors.
+- Bounded fMP4 init-cache growth with FIFO eviction.
+- Dropped non-ID3 MPEG-TS PES buffers after a bounded probe to avoid retaining unrelated media payloads.
+
+### Removed
+
+- Removed the unused ID3 scanner implementation and duplicate parsing/classifier helpers.
+
 ## [0.4.0] - 2026-07-02
 
 ### Added
@@ -23,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - MPEGTS streams read over HTTP (and other network readers) no longer panic with `index out of range` when a read does not land on a 188-byte packet boundary. The decoder now carries the partial tail between reads and only parses whole, sync-aligned TS packets. ([#1](https://github.com/keithah/tidemark/issues/1))
 
+[0.4.1]: https://github.com/keithah/tidemark/releases/tag/v0.4.1
 [0.4.0]: https://github.com/keithah/tidemark/releases/tag/v0.4.0
 [0.3.2]: https://github.com/keithah/tidemark/releases/tag/v0.3.2
 

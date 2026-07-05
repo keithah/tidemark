@@ -3,9 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/signal"
 	"strings"
@@ -41,6 +43,11 @@ type Config struct {
 
 type markerProducer func(context.Context, chan<- *marker.Marker) error
 
+const (
+	sourceInitialRetryDelay = time.Second
+	sourceMaxRetryDelay     = 30 * time.Second
+)
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
@@ -48,6 +55,10 @@ func main() {
 func run(args []string) int {
 	cfg, url, ctx, cancel, err := parseFlags(args)
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			// Usage was already printed by the flag package; -h is not an error.
+			return 0
+		}
 		fmt.Fprintf(os.Stderr, "[tidemark] error: %s\n", err)
 		return 1
 	}
@@ -88,7 +99,7 @@ func run(args []string) int {
 		return 1
 	}
 
-	if runErr != nil && runErr != context.Canceled && runErr != context.DeadlineExceeded {
+	if runErr != nil && !errors.Is(runErr, context.Canceled) && !errors.Is(runErr, context.DeadlineExceeded) {
 		fmt.Fprintf(os.Stderr, "[tidemark] error: %s\n", runErr)
 		return 1
 	}
@@ -117,13 +128,12 @@ func parseFlags(args []string) (*Config, string, context.Context, context.Cancel
 
 	if cfg.Filter != "" {
 		cfg.Filter = strings.ToLower(cfg.Filter)
-		switch cfg.Filter {
-		case "scte35", "id3", "icy", "fmp4":
-			cfg.HasFilter = true
-			cfg.FilterType = parseMarkerType(cfg.Filter)
-		default:
+		filterType, ok := marker.ParseType(cfg.Filter)
+		if !ok {
 			return nil, "", nil, func() {}, fmt.Errorf("--filter must be one of: scte35, id3, icy, fmp4")
 		}
+		cfg.HasFilter = true
+		cfg.FilterType = filterType
 	}
 
 	url := fs.Arg(0)
@@ -182,21 +192,6 @@ func shouldFilter(m *marker.Marker, cfg *Config) bool {
 	return m.Type != cfg.FilterType
 }
 
-func parseMarkerType(value string) marker.MarkerType {
-	switch value {
-	case "scte35":
-		return marker.MarkerSCTE35
-	case "id3":
-		return marker.MarkerID3
-	case "icy":
-		return marker.MarkerICY
-	case "fmp4":
-		return marker.MarkerFMP4
-	default:
-		return marker.MarkerSCTE35
-	}
-}
-
 func openJSONOut(path string) (*output.JSONOut, error) {
 	if path == "" {
 		return nil, nil
@@ -221,6 +216,11 @@ func runMarkerSource(ctx context.Context, cfg *Config, producer markerProducer) 
 
 	go func() {
 		defer close(ch)
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				errCh <- fmt.Errorf("source panic: %v", recovered)
+			}
+		}()
 		errCh <- producer(sourceCtx, ch)
 	}()
 
@@ -281,10 +281,64 @@ func runMarkerSource(ctx context.Context, cfg *Config, producer markerProducer) 
 	return err
 }
 
+func retryingProducer(producer markerProducer, initialDelay, maxDelay time.Duration) markerProducer {
+	return func(ctx context.Context, ch chan<- *marker.Marker) error {
+		delay := initialDelay
+		for {
+			err := producer(ctx, ch)
+			if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			if isPermanentError(err) {
+				return err
+			}
+			if delay <= 0 {
+				continue
+			}
+			timer := time.NewTimer(jitterDelay(delay))
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+			delay = nextSourceRetryDelay(delay, maxDelay)
+		}
+	}
+}
+
+type permanentError interface {
+	Permanent() bool
+}
+
+func isPermanentError(err error) bool {
+	var perr permanentError
+	return errors.As(err, &perr) && perr.Permanent()
+}
+
+func jitterDelay(delay time.Duration) time.Duration {
+	jitter := delay / 2
+	if jitter <= 0 {
+		return delay
+	}
+	return delay + time.Duration(rand.Int63n(int64(jitter)))
+}
+
+func nextSourceRetryDelay(delay, maxDelay time.Duration) time.Duration {
+	if delay <= 0 {
+		return sourceInitialRetryDelay
+	}
+	delay *= 2
+	if maxDelay > 0 && delay > maxDelay {
+		return maxDelay
+	}
+	return delay
+}
+
 func runICY(ctx context.Context, url string, metaInt int, cfg *Config) error {
 	fmt.Fprintf(os.Stderr, "[tidemark] reading ICY stream...\n")
 	reader := icy.NewReader(url, metaInt)
-	return runMarkerSource(ctx, cfg, reader.Read)
+	return runMarkerSource(ctx, cfg, retryingProducer(reader.Read, sourceInitialRetryDelay, sourceMaxRetryDelay))
 }
 
 func runHLS(ctx context.Context, url string, cfg *Config) error {
@@ -296,7 +350,7 @@ func runHLS(ctx context.Context, url string, cfg *Config) error {
 func runMPEGTS(ctx context.Context, url string, cfg *Config) error {
 	fmt.Fprintf(os.Stderr, "[tidemark] reading MPEGTS stream...\n")
 	decoder := mpegts.NewDecoder()
-	return runMarkerSource(ctx, cfg, func(ctx context.Context, ch chan<- *marker.Marker) error {
+	return runMarkerSource(ctx, cfg, retryingProducer(func(ctx context.Context, ch chan<- *marker.Marker) error {
 		resp, err := detector.HTTPGet(ctx, url)
 		if err != nil {
 			return err
@@ -304,11 +358,11 @@ func runMPEGTS(ctx context.Context, url string, cfg *Config) error {
 		resp.Body = httpclient.WithIdleReadTimeout(resp.Body, httpclient.DefaultIdleReadTimeout)
 		defer resp.Body.Close()
 		return decoder.DecodeReader(ctx, resp.Body, ch)
-	})
+	}, sourceInitialRetryDelay, sourceMaxRetryDelay))
 }
 
 func runUDP(ctx context.Context, url string, cfg *Config) error {
 	fmt.Fprintf(os.Stderr, "[tidemark] reading UDP stream...\n")
 	reader := udp.NewReader(url)
-	return runMarkerSource(ctx, cfg, reader.Read)
+	return runMarkerSource(ctx, cfg, retryingProducer(reader.Read, sourceInitialRetryDelay, sourceMaxRetryDelay))
 }

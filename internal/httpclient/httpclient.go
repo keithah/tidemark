@@ -97,10 +97,14 @@ type idleReadCloser struct {
 func (r *idleReadCloser) Read(p []byte) (int, error) {
 	n, err := r.body.Read(p)
 	if n > 0 {
+		// Data arrived: reset the idle timer and deliver it. Never convert a
+		// data-bearing read into an idle-timeout error, even if the timer fired
+		// concurrently — the bytes are real and the caller must not lose them.
 		r.resetTimer()
+		return n, err
 	}
 	if err != nil && r.isTimedOut() {
-		return n, ErrIdleReadTimeout
+		return 0, ErrIdleReadTimeout
 	}
 	return n, err
 }

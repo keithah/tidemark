@@ -17,145 +17,7 @@ type Tag struct {
 
 var id3Marker = []byte("ID3")
 
-// Scanner incrementally extracts complete ID3 tags from a byte stream.
-type Scanner struct {
-	maxTagBytes int
-	buf         []byte
-}
-
-// NewScanner creates an incremental ID3 scanner with a maximum complete tag size.
-func NewScanner(maxTagBytes int) *Scanner {
-	if maxTagBytes <= 0 {
-		maxTagBytes = 1 << 20
-	}
-	return &Scanner{maxTagBytes: maxTagBytes}
-}
-
-// Write appends stream bytes and returns any complete ID3 tags found.
-func (s *Scanner) Write(data []byte) ([]Tag, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-	s.buf = append(s.buf, data...)
-	return s.scan(false)
-}
-
-// Flush returns complete tags still buffered and discards incomplete trailing bytes.
-func (s *Scanner) Flush() ([]Tag, error) {
-	return s.scan(true)
-}
-
-func (s *Scanner) scan(flush bool) ([]Tag, error) {
-	tags := make([]Tag, 0, 4)
-	needsCompact := false
-	compactIfNeeded := func() {
-		if needsCompact {
-			s.compact()
-		}
-	}
-	for {
-		idx := bytes.Index(s.buf, id3Marker)
-		if idx < 0 {
-			if flush || len(s.buf) <= 2 {
-				if flush {
-					s.buf = nil
-				}
-				return tags, nil
-			}
-			s.keepTail(2)
-			return tags, nil
-		}
-		if idx > 0 {
-			s.advance(idx)
-			needsCompact = true
-		}
-		if len(s.buf) < 10 {
-			if flush {
-				s.buf = nil
-			} else {
-				compactIfNeeded()
-			}
-			return tags, nil
-		}
-		version := int(s.buf[3])
-		if version != 3 && version != 4 {
-			s.advance(3)
-			needsCompact = true
-			continue
-		}
-		sizeBytes := s.buf[6:10]
-		validSize := true
-		for _, b := range sizeBytes {
-			if b >= 0x80 {
-				validSize = false
-				break
-			}
-		}
-		if !validSize {
-			s.advance(3)
-			needsCompact = true
-			continue
-		}
-		tagSize := decodeSynchsafe(sizeBytes)
-		if tagSize <= 0 {
-			s.advance(10)
-			needsCompact = true
-			continue
-		}
-		total := 10 + tagSize
-		if total > s.maxTagBytes {
-			compactIfNeeded()
-			return tags, fmt.Errorf("ID3 tag too large: exceeds %d bytes", s.maxTagBytes)
-		}
-		if len(s.buf) < total {
-			if flush {
-				s.buf = nil
-			} else {
-				compactIfNeeded()
-			}
-			return tags, nil
-		}
-		found, err := Parse(s.buf[:total])
-		if err != nil {
-			compactIfNeeded()
-			return tags, err
-		}
-		tags = append(tags, found...)
-		s.advance(total)
-		needsCompact = true
-	}
-}
-
-func (s *Scanner) advance(n int) {
-	if n <= 0 {
-		return
-	}
-	if n >= len(s.buf) {
-		s.buf = s.buf[:0]
-		return
-	}
-	s.buf = s.buf[n:]
-}
-
-func (s *Scanner) keepTail(n int) {
-	if n <= 0 || len(s.buf) == 0 {
-		s.buf = nil
-		return
-	}
-	if n > len(s.buf) {
-		n = len(s.buf)
-	}
-	tail := append([]byte(nil), s.buf[len(s.buf)-n:]...)
-	s.buf = tail
-}
-
-func (s *Scanner) compact() {
-	if len(s.buf) == 0 {
-		s.buf = s.buf[:0]
-		return
-	}
-	s.buf = append([]byte(nil), s.buf...)
-}
+const mpegtsID3ProbeBytes = 32
 
 // Parse scans raw bytes for ID3v2 tags and extracts frames.
 // Returns all found tags. Supports v2.3 and v2.4.
@@ -188,13 +50,19 @@ func Parse(data []byte) ([]Tag, error) {
 
 		flags := header[5]
 
-		// Synchsafe size (4 bytes, each < 0x80)
+		// Synchsafe size (4 bytes, each < 0x80). A non-synchsafe byte means this
+		// is not a real ID3 header; skip past the marker and resync the scan.
 		sizeBytes := header[6:10]
+		validSize := true
 		for _, b := range sizeBytes {
 			if b >= 0x80 {
-				offset += 3
-				continue
+				validSize = false
+				break
 			}
+		}
+		if !validSize {
+			offset += 3
+			continue
 		}
 		tagSize := decodeSynchsafe(sizeBytes)
 		if tagSize <= 0 {
@@ -202,22 +70,29 @@ func Parse(data []byte) ([]Tag, error) {
 			continue
 		}
 
-		frameStart := offset + 10
-
-		// Skip extended header if present
-		if flags&0x40 != 0 && frameStart+4 <= len(data) {
-			var extSize int
-			if version == 4 {
-				extSize = decodeSynchsafe(data[frameStart : frameStart+4])
-			} else {
-				extSize = int(binary.BigEndian.Uint32(data[frameStart : frameStart+4]))
-			}
-			frameStart += extSize
-		}
-
 		tagEnd := offset + 10 + tagSize
 		if tagEnd > len(data) {
 			tagEnd = len(data)
+		}
+
+		frameStart := offset + 10
+
+		// Skip extended header if present. In ID3v2.4 the size field is synchsafe
+		// and covers the whole extended header; in ID3v2.3 it is a plain uint32
+		// that EXCLUDES its own 4 size bytes, so those must be added separately.
+		if flags&0x40 != 0 && frameStart+4 <= len(data) {
+			if version == 4 {
+				frameStart += decodeSynchsafe(data[frameStart : frameStart+4])
+			} else {
+				frameStart += 4 + int(binary.BigEndian.Uint32(data[frameStart:frameStart+4]))
+			}
+		}
+
+		// A malformed extended-header size can push frameStart out of range (or
+		// wrap negative on 32-bit); bail on this tag rather than risk a panic.
+		if frameStart < offset+10 || frameStart > tagEnd {
+			offset = tagEnd
+			continue
 		}
 
 		// Parse frames
@@ -236,13 +111,16 @@ func Parse(data []byte) ([]Tag, error) {
 				frameSize = int(binary.BigEndian.Uint32(data[pos+4 : pos+8]))
 			}
 
-			// Skip 2 bytes of frame flags
+			// Skip 2 bytes of frame flags.
 			frameDataStart := pos + 10
-			frameDataEnd := frameDataStart + frameSize
 
-			if frameDataEnd > tagEnd || frameSize <= 0 {
+			// Compare against remaining space instead of frameDataStart+frameSize,
+			// which could overflow to a negative int on 32-bit platforms for a
+			// hostile frameSize and slip past the bounds check into a slice panic.
+			if frameSize <= 0 || frameSize > tagEnd-frameDataStart {
 				break
 			}
+			frameDataEnd := frameDataStart + frameSize
 
 			frameData := data[frameDataStart:frameDataEnd]
 			tag, ok := parseFrame(frameID, frameData)
@@ -448,24 +326,40 @@ func decodeText(data []byte, encoding byte) string {
 	}
 }
 
+// decodeUTF16 decodes UTF-16 text, honoring a leading BOM and defaulting to
+// little-endian when none is present (ID3 encoding 0x01).
 func decodeUTF16(data []byte) string {
-	// Trim double-null for UTF-16
-	for len(data) >= 2 && data[len(data)-1] == 0 && data[len(data)-2] == 0 {
-		data = data[:len(data)-2]
-	}
+	data = trimUTF16Nulls(data)
 	if len(data) < 2 {
 		return ""
 	}
-	// Check BOM
-	var bigEndian bool
+	bigEndian := false
 	if data[0] == 0xFE && data[1] == 0xFF {
 		bigEndian = true
 		data = data[2:]
 	} else if data[0] == 0xFF && data[1] == 0xFE {
-		bigEndian = false
 		data = data[2:]
 	}
+	return decodeUTF16Units(data, bigEndian)
+}
 
+// decodeUTF16BE decodes big-endian UTF-16 text with no BOM (ID3 encoding 0x02).
+func decodeUTF16BE(data []byte) string {
+	data = trimUTF16Nulls(data)
+	if len(data) < 2 {
+		return ""
+	}
+	return decodeUTF16Units(data, true)
+}
+
+func trimUTF16Nulls(data []byte) []byte {
+	for len(data) >= 2 && data[len(data)-1] == 0 && data[len(data)-2] == 0 {
+		data = data[:len(data)-2]
+	}
+	return data
+}
+
+func decodeUTF16Units(data []byte, bigEndian bool) string {
 	u16s := make([]uint16, len(data)/2)
 	for i := 0; i < len(u16s); i++ {
 		if bigEndian {
@@ -473,20 +367,6 @@ func decodeUTF16(data []byte) string {
 		} else {
 			u16s[i] = uint16(data[i*2+1])<<8 | uint16(data[i*2])
 		}
-	}
-	return string(utf16.Decode(u16s))
-}
-
-func decodeUTF16BE(data []byte) string {
-	for len(data) >= 2 && data[len(data)-1] == 0 && data[len(data)-2] == 0 {
-		data = data[:len(data)-2]
-	}
-	if len(data) < 2 {
-		return ""
-	}
-	u16s := make([]uint16, len(data)/2)
-	for i := 0; i < len(u16s); i++ {
-		u16s[i] = uint16(data[i*2])<<8 | uint16(data[i*2+1])
 	}
 	return string(utf16.Decode(u16s))
 }
@@ -550,80 +430,126 @@ func ParseFromMPEGTS(data []byte) ([][]Tag, error) {
 		return [][]Tag{tags}, err
 	}
 
-	bufs := make(map[uint16][]byte)
-	var id3Blobs [][]byte
-
-	// collect checks the first 32 bytes of buf for "ID3" magic and, if found,
-	// appends buf[idx:] to id3Blobs. 32 bytes is enough to cover any PES header
-	// (max ~19 bytes) plus the 3-byte magic.
-	collect := func(buf []byte) {
-		if len(buf) == 0 {
-			return
-		}
-		limit := len(buf)
-		if limit > 32 {
-			limit = 32
-		}
-		idx := bytes.Index(buf[:limit], []byte("ID3"))
-		if idx >= 0 {
-			id3Blobs = append(id3Blobs, buf[idx:])
-		}
-	}
-
+	var extractor MPEGTSExtractor
 	for i := 0; i+188 <= len(data); i += 188 {
-		pkt := data[i : i+188]
-		if pkt[0] != 0x47 {
-			continue // lost sync, skip
-		}
+		extractor.PushPacket(data[i : i+188])
+	}
+	return extractor.Groups(), nil
+}
 
-		pid := uint16(pkt[1]&0x1F)<<8 | uint16(pkt[2])
-		pusi := pkt[1]&0x40 != 0
-		afc := (pkt[3] >> 4) & 0x03
+// MPEGTSExtractor incrementally extracts timed-ID3 PES payloads from
+// sync-aligned 188-byte MPEG-TS packets.
+type MPEGTSExtractor struct {
+	bufs   map[uint16][]byte
+	groups [][]Tag
+}
 
-		if afc&0x01 == 0 {
-			continue // no payload in this packet
-		}
-
-		// Determine where the payload starts within the 188-byte packet.
-		// Bytes 0-3 are the TS header. If an adaptation field is present
-		// (afc & 0x02), byte 4 is its length and we skip past it.
-		payloadStart := 4
-		if afc&0x02 != 0 {
-			payloadStart = 5 + int(pkt[4])
-		}
-		if payloadStart >= 188 {
-			continue
-		}
-		payload := pkt[payloadStart:]
-
-		if pusi {
-			// A new PES is starting on this PID. Flush whatever was
-			// accumulated for this PID (it's a completed PES).
-			collect(bufs[pid])
-			newBuf := make([]byte, len(payload))
-			copy(newBuf, payload)
-			bufs[pid] = newBuf
-		} else if _, ok := bufs[pid]; ok {
-			// Continuation packet — only accumulate if we already have
-			// a buffer for this PID (i.e., we saw its PUSI packet).
-			bufs[pid] = append(bufs[pid], payload...)
-		}
+// PushPacket adds one sync-aligned MPEG-TS packet to the extractor.
+func (e *MPEGTSExtractor) PushPacket(pkt []byte) {
+	if len(pkt) != 188 || pkt[0] != 0x47 {
+		return
+	}
+	pid := uint16(pkt[1]&0x1F)<<8 | uint16(pkt[2])
+	pusi := pkt[1]&0x40 != 0
+	afc := (pkt[3] >> 4) & 0x03
+	if afc&0x01 == 0 {
+		return
 	}
 
-	// Flush any PES still in progress at end of segment.
-	for _, buf := range bufs {
-		collect(buf)
+	payloadStart := 4
+	if afc&0x02 != 0 {
+		payloadStart = 5 + int(pkt[4])
 	}
+	if payloadStart >= 188 {
+		return
+	}
+	payload := pkt[payloadStart:]
 
-	var allGroups [][]Tag
-	for _, blob := range id3Blobs {
-		tags, err := Parse(blob)
-		if err != nil {
-			_ = err // non-fatal: collect whatever frames were parsed
+	if pusi {
+		e.collect(pid)
+		if e.bufs == nil {
+			e.bufs = make(map[uint16][]byte)
 		}
-		if len(tags) > 0 {
-			allGroups = append(allGroups, tags)
+		e.bufs[pid] = append(e.bufs[pid][:0], payload...)
+		e.keepPotentialID3PES(pid)
+		return
+	}
+	if e.bufs != nil {
+		if _, ok := e.bufs[pid]; ok {
+			e.bufs[pid] = append(e.bufs[pid], payload...)
+			e.keepPotentialID3PES(pid)
 		}
 	}
-	return allGroups, nil
+}
+
+// Groups flushes any in-progress PES payloads and returns extracted ID3 tag
+// groups. Calling Groups more than once is safe; later calls return the same
+// groups without duplicating flushed payloads.
+func (e *MPEGTSExtractor) Groups() [][]Tag {
+	for pid := range e.bufs {
+		e.collect(pid)
+	}
+	e.bufs = nil
+	return e.groups
+}
+
+func (e *MPEGTSExtractor) collect(pid uint16) {
+	buf := e.bufs[pid]
+	delete(e.bufs, pid)
+	if len(buf) == 0 {
+		return
+	}
+	limit := len(buf)
+	if limit > 32 {
+		limit = 32
+	}
+	idx := bytes.Index(buf[:limit], []byte("ID3"))
+	if idx < 0 {
+		return
+	}
+	tags, err := Parse(buf[idx:])
+	if err == nil && len(tags) > 0 {
+		e.groups = append(e.groups, tags)
+	}
+}
+
+func (e *MPEGTSExtractor) keepPotentialID3PES(pid uint16) {
+	buf := e.bufs[pid]
+	if len(buf) == 0 {
+		delete(e.bufs, pid)
+		return
+	}
+	limit := len(buf)
+	if limit > mpegtsID3ProbeBytes {
+		limit = mpegtsID3ProbeBytes
+	}
+	idx := bytes.Index(buf[:limit], id3Marker)
+	if idx < 0 {
+		if len(buf) >= mpegtsID3ProbeBytes {
+			delete(e.bufs, pid)
+		}
+		return
+	}
+	if idx > 0 {
+		buf = append(buf[:0], buf[idx:]...)
+		e.bufs[pid] = buf
+	}
+	if tagSize, ok := id3TotalSize(buf); ok && len(buf) > tagSize {
+		e.bufs[pid] = buf[:tagSize]
+	}
+}
+
+func id3TotalSize(buf []byte) (int, bool) {
+	if len(buf) < 10 || !bytes.HasPrefix(buf, id3Marker) {
+		return 0, false
+	}
+	version := buf[3]
+	if version != 3 && version != 4 {
+		return 0, false
+	}
+	size := decodeSynchsafe(buf[6:10])
+	if size <= 0 {
+		return 0, false
+	}
+	return 10 + size, true
 }

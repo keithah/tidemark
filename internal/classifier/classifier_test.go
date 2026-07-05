@@ -243,3 +243,36 @@ func TestClassifyID3CaseInsensitive(t *testing.T) {
 		t.Errorf("expected AD_START for case insensitive, got %s", got)
 	}
 }
+
+func TestClassifyID3AdEndWordBoundary(t *testing.T) {
+	t.Parallel()
+	// "sad_ending" contains the substring "ad_end" but is ordinary content; a
+	// bounded match must not classify it as AD_END.
+	m := &marker.Marker{Type: marker.MarkerID3, Tags: map[string]string{"TIT2": "sad_ending theme"}}
+	if got := New().Classify(m); got != marker.Unknown {
+		t.Errorf("got %s, want METADATA (ad_end must not match inside sad_ending)", got)
+	}
+
+	// A delimited ad_end token still classifies as AD_END.
+	m = &marker.Marker{Type: marker.MarkerID3, Tags: map[string]string{"TXXX": "cue ad_end now"}}
+	if got := New().Classify(m); got != marker.AdEnd {
+		t.Errorf("got %s, want AD_END for delimited ad_end", got)
+	}
+}
+
+func TestClassifyID3DeterministicWithBothSignals(t *testing.T) {
+	t.Parallel()
+	// A marker carrying both an ad-start token and an ad-end keyword must always
+	// classify the same way regardless of map iteration order (AD_END wins).
+	for i := 0; i < 50; i++ {
+		m := &marker.Marker{Type: marker.MarkerID3, Tags: map[string]string{
+			"TIT2": "ad break",
+			"TXXX": "ad_end",
+			"TALB": "spot",
+			"COMM": "content_start",
+		}}
+		if got := New().Classify(m); got != marker.AdEnd {
+			t.Fatalf("iteration %d: got %s, want AD_END (deterministic)", i, got)
+		}
+	}
+}

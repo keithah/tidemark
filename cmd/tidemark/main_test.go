@@ -71,6 +71,70 @@ func TestRunMarkerSourcePropagatesProducerError(t *testing.T) {
 	}
 }
 
+func TestRunMarkerSourceRecoversProducerPanic(t *testing.T) {
+	cfg := &Config{}
+	err := runMarkerSource(context.Background(), cfg, func(ctx context.Context, ch chan<- *marker.Marker) error {
+		panic("producer panic")
+	})
+	if err == nil {
+		t.Fatal("expected panic error")
+	}
+	if !strings.Contains(err.Error(), "producer panic") {
+		t.Fatalf("error = %q, want producer panic", err.Error())
+	}
+}
+
+func TestRetryingProducerRetriesErrorThenStopsOnSuccess(t *testing.T) {
+	attempts := 0
+	producer := retryingProducer(func(ctx context.Context, ch chan<- *marker.Marker) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("temporary source failure")
+		}
+		return nil
+	}, 0, 0)
+
+	if err := producer(context.Background(), make(chan *marker.Marker, 1)); err != nil {
+		t.Fatalf("retrying producer error = %v, want nil", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+type permanentTestError struct {
+	err error
+}
+
+func (e permanentTestError) Error() string {
+	return e.err.Error()
+}
+
+func (e permanentTestError) Unwrap() error {
+	return e.err
+}
+
+func (e permanentTestError) Permanent() bool {
+	return true
+}
+
+func TestRetryingProducerDoesNotRetryPermanentError(t *testing.T) {
+	wantErr := errors.New("bad source configuration")
+	attempts := 0
+	producer := retryingProducer(func(ctx context.Context, ch chan<- *marker.Marker) error {
+		attempts++
+		return permanentTestError{err: wantErr}
+	}, time.Millisecond, time.Millisecond)
+
+	err := producer(context.Background(), make(chan *marker.Marker, 1))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("retrying producer error = %v, want %v", err, wantErr)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
 func TestRunMarkerSourceReturnsOutputError(t *testing.T) {
 	oldStdout := os.Stdout
 	_, brokenStdout, err := os.Pipe()
@@ -132,7 +196,7 @@ func simulateMarkerLoop(markers []*marker.Marker, filter string, noColor bool) (
 	cfg := &Config{NoColor: noColor}
 	if filter != "" {
 		cfg.Filter = filter
-		cfg.FilterType = parseMarkerType(filter)
+		cfg.FilterType, _ = marker.ParseType(filter)
 		cfg.HasFilter = true
 	}
 
@@ -243,7 +307,7 @@ func TestShouldFilter(t *testing.T) {
 		cfg := &Config{}
 		if tt.filter != "" {
 			cfg.Filter = tt.filter
-			cfg.FilterType = parseMarkerType(tt.filter)
+			cfg.FilterType, _ = marker.ParseType(tt.filter)
 			cfg.HasFilter = true
 		}
 		got := shouldFilter(m, cfg)

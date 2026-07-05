@@ -3,6 +3,7 @@ package mpegts
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"io"
 	"testing"
 	"time"
@@ -183,4 +184,63 @@ func TestDecodeBufLargeGarbage(t *testing.T) {
 	garbage := bytes.Repeat([]byte{0xDE, 0xAD, 0xBE, 0xEF}, 1000)
 	markers, _ := d.DecodeBuf(garbage)
 	_ = markers // no panic = pass
+}
+
+func TestDecodeSegmentExtractsTimedID3(t *testing.T) {
+	d := NewDecoder()
+	data := buildTimedID3TSSegmentForTest(0x0104, buildID3TextTagForTest("TIT2", "ad break"))
+
+	result, err := d.DecodeSegment(data)
+	if err != nil {
+		t.Fatalf("DecodeSegment error: %v", err)
+	}
+	if len(result.ID3) != 1 {
+		t.Fatalf("ID3 groups = %d, want 1", len(result.ID3))
+	}
+	if got := result.ID3[0][0].Value; got != "ad break" {
+		t.Fatalf("ID3 value = %q, want ad break", got)
+	}
+}
+
+func buildID3TextTagForTest(frameID, text string) []byte {
+	payload := append([]byte{0x03}, []byte(text)...)
+	frame := make([]byte, 10+len(payload))
+	copy(frame[0:4], frameID)
+	binary.BigEndian.PutUint32(frame[4:8], uint32(len(payload)))
+	copy(frame[10:], payload)
+
+	tag := make([]byte, 10+len(frame))
+	copy(tag[0:3], "ID3")
+	tag[3] = 4
+	encodeSynchsafeForTest(tag[6:10], len(frame))
+	copy(tag[10:], frame)
+	return tag
+}
+
+func encodeSynchsafeForTest(dst []byte, n int) {
+	dst[0] = byte((n >> 21) & 0x7F)
+	dst[1] = byte((n >> 14) & 0x7F)
+	dst[2] = byte((n >> 7) & 0x7F)
+	dst[3] = byte(n & 0x7F)
+}
+
+func buildTimedID3TSSegmentForTest(pid uint16, id3data []byte) []byte {
+	pes := append([]byte{0x00, 0x00, 0x01, 0xbd, 0x00, 0x00, 0x80, 0x00, 0x00}, id3data...)
+	var out []byte
+	cc := byte(0)
+	for len(pes) > 0 {
+		pkt := bytes.Repeat([]byte{0xff}, tsPacketSize)
+		pkt[0] = tsSyncByte
+		pkt[1] = byte(pid>>8) & 0x1f
+		if len(out) == 0 {
+			pkt[1] |= 0x40
+		}
+		pkt[2] = byte(pid)
+		pkt[3] = 0x10 | (cc & 0x0f)
+		cc++
+		n := copy(pkt[4:], pes)
+		pes = pes[n:]
+		out = append(out, pkt...)
+	}
+	return out
 }

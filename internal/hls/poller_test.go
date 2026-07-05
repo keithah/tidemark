@@ -512,7 +512,7 @@ segment0.ts
 	}
 }
 
-func TestFetchAndProcessDoesNotForgetRecentlySeenSegmentsOutsideCurrentWindow(t *testing.T) {
+func TestFetchAndProcessReemitsReusedURLAfterMediaSequenceReset(t *testing.T) {
 	manifests := []string{
 		`#EXTM3U
 #EXT-X-TARGETDURATION:6
@@ -569,8 +569,63 @@ segment0.ts
 			cueOutCount++
 		}
 	}
-	if cueOutCount != 1 {
-		t.Fatalf("CUE-OUT count = %d, want 1", cueOutCount)
+	if cueOutCount != 2 {
+		t.Fatalf("CUE-OUT count = %d, want 2", cueOutCount)
+	}
+}
+
+func TestFetchAndProcessEmitsTrailingTagAddedToSeenLastSegment(t *testing.T) {
+	manifests := []string{
+		`#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:6.0,
+segment0.ts
+`,
+		`#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:6.0,
+segment0.ts
+#EXT-X-CUE-IN
+#EXT-X-ENDLIST
+`,
+	}
+	var mu sync.Mutex
+	fetches := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stream.m3u8" {
+			mu.Lock()
+			idx := fetches
+			if idx >= len(manifests) {
+				idx = len(manifests) - 1
+			}
+			fetches++
+			mu.Unlock()
+			fmt.Fprint(w, manifests[idx])
+			return
+		}
+		w.Write([]byte{0xFF})
+	}))
+	defer srv.Close()
+
+	p := NewPoller(srv.URL + "/stream.m3u8")
+	ch := make(chan *marker.Marker, 10)
+	for i := 0; i < len(manifests); i++ {
+		if _, _, err := p.fetchAndProcess(context.Background(), srv.URL+"/stream.m3u8", ch); err != nil {
+			t.Fatalf("fetchAndProcess %d error: %v", i, err)
+		}
+	}
+	close(ch)
+
+	cueInCount := 0
+	for m := range ch {
+		if m.Tag == "#EXT-X-CUE-IN" {
+			cueInCount++
+		}
+	}
+	if cueInCount != 1 {
+		t.Fatalf("CUE-IN count = %d, want 1", cueInCount)
 	}
 }
 
@@ -654,6 +709,7 @@ segment0.ts
 	defer srv.Close()
 
 	p := NewPoller(srv.URL + "/stream.m3u8")
+	p.pollInterval = time.Millisecond
 	ch := make(chan *marker.Marker, 100)
 
 	_ = p.Poll(context.Background(), ch)
@@ -771,13 +827,13 @@ segment0.ts
 	defer cancel()
 
 	p := NewPoller(srv.URL + "/stream.m3u8")
+	p.pollInterval = time.Millisecond
 	ch := make(chan *marker.Marker, 100)
 
 	// This should retry on the 500 error and eventually succeed
 	err := p.Poll(ctx, ch)
 	if err != nil {
-		// If context expired before retry, that's acceptable
-		t.Logf("Poll returned: %v (may be timeout, acceptable)", err)
+		t.Fatalf("Poll error: %v", err)
 	}
 }
 
@@ -958,6 +1014,7 @@ segment0.ts
 func TestFetchAndProcessEvictsSeenEntriesAtCapacity(t *testing.T) {
 	manifest := `#EXTM3U
 #EXT-X-MEDIA-SEQUENCE:10
+#EXT-X-CUE-IN
 #EXTINF:6.0,
 segment10.ts
 #EXT-X-ENDLIST
@@ -973,19 +1030,20 @@ segment10.ts
 
 	p := NewPoller(srv.URL + "/stream.m3u8")
 	p.planner = newPlaylistPlanner(1)
-	staleURL := "http://stale.example/segment.ts"
-	p.planner.tagSeen.Remember(staleURL)
-	p.planner.segmentSeen.Remember(staleURL)
+	staleKey := seenKey{url: "http://stale.example/segment.ts"}
+	staleTagKey := makeTagSeenKey(staleKey, &TagResult{Tag: "#EXT-X-CUE-IN", IsDirect: true, DirectType: marker.AdEnd})
+	p.planner.tagSeen.Remember(staleTagKey)
+	p.planner.segmentSeen.Remember(staleKey)
 	ch := make(chan *marker.Marker, 100)
 
 	_, _, err := p.fetchAndProcess(context.Background(), srv.URL+"/stream.m3u8", ch)
 	if err != nil {
 		t.Fatalf("fetchAndProcess error: %v", err)
 	}
-	if p.planner.tagSeen.Has(staleURL) {
+	if p.planner.tagSeen.Has(staleTagKey) {
 		t.Fatal("old tag key was not evicted")
 	}
-	if p.planner.segmentSeen.Has(staleURL) {
+	if p.planner.segmentSeen.Has(staleKey) {
 		t.Fatal("old segment URL was not evicted")
 	}
 }
