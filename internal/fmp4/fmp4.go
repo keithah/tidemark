@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"io"
 )
 
 // InitInfo contains the track-level data needed to interpret CMAF fragments.
@@ -45,9 +46,24 @@ type EventMessage struct {
 }
 
 type boxHeader struct {
-	typ     string
+	typ     uint32
 	payload []byte
 }
+
+const (
+	boxEmsg = uint32('e')<<24 | uint32('m')<<16 | uint32('s')<<8 | uint32('g')
+	boxHdlr = uint32('h')<<24 | uint32('d')<<16 | uint32('l')<<8 | uint32('r')
+	boxMdia = uint32('m')<<24 | uint32('d')<<16 | uint32('i')<<8 | uint32('a')
+	boxMdhd = uint32('m')<<24 | uint32('d')<<16 | uint32('h')<<8 | uint32('d')
+	boxMoof = uint32('m')<<24 | uint32('o')<<16 | uint32('o')<<8 | uint32('f')
+	boxMoov = uint32('m')<<24 | uint32('o')<<16 | uint32('o')<<8 | uint32('v')
+	boxTfdt = uint32('t')<<24 | uint32('f')<<16 | uint32('d')<<8 | uint32('t')
+	boxTfhd = uint32('t')<<24 | uint32('f')<<16 | uint32('h')<<8 | uint32('d')
+	boxTkhd = uint32('t')<<24 | uint32('k')<<16 | uint32('h')<<8 | uint32('d')
+	boxTraf = uint32('t')<<24 | uint32('r')<<16 | uint32('a')<<8 | uint32('f')
+	boxTrak = uint32('t')<<24 | uint32('r')<<16 | uint32('a')<<8 | uint32('k')
+	boxTrun = uint32('t')<<24 | uint32('r')<<16 | uint32('u')<<8 | uint32('n')
+)
 
 type trackBuilder struct {
 	id        uint32
@@ -66,8 +82,14 @@ type trafBuilder struct {
 // ParseInit extracts track IDs, timescales, and handler types from an init segment.
 func ParseInit(data []byte) (InitInfo, error) {
 	info := InitInfo{Tracks: make(map[uint32]TrackInfo)}
-	for _, moov := range boxesOfType(data, "moov") {
-		for _, trak := range boxesOfType(moov.payload, "trak") {
+	walkBoxes(data, func(moov boxHeader) bool {
+		if moov.typ != boxMoov {
+			return true
+		}
+		walkBoxes(moov.payload, func(trak boxHeader) bool {
+			if trak.typ != boxTrak {
+				return true
+			}
 			track, ok := parseTrack(trak.payload)
 			if ok && track.id != 0 && track.timescale != 0 {
 				info.Tracks[track.id] = TrackInfo{
@@ -76,8 +98,10 @@ func ParseInit(data []byte) (InitInfo, error) {
 					Handler:   track.handler,
 				}
 			}
-		}
-	}
+			return true
+		})
+		return true
+	})
 	if len(info.Tracks) == 0 {
 		return info, fmt.Errorf("no fMP4 tracks found")
 	}
@@ -87,26 +111,140 @@ func ParseInit(data []byte) (InitInfo, error) {
 // ParseFragment extracts decode timing for samples in a media fragment.
 func ParseFragment(init InitInfo, data []byte) (FragmentTiming, error) {
 	var timing FragmentTiming
-	for _, box := range parseBoxes(data) {
+	walkBoxes(data, func(box boxHeader) bool {
 		switch box.typ {
-		case "emsg":
+		case boxEmsg:
 			if parsed, ok := parseEMSG(box.payload); ok {
 				timing.Events = append(timing.Events, parsed)
 			}
-		case "moof":
-			for _, child := range parseBoxes(box.payload) {
+		case boxMoof:
+			walkBoxes(box.payload, func(child boxHeader) bool {
 				switch child.typ {
-				case "emsg":
+				case boxEmsg:
 					if parsed, ok := parseEMSG(child.payload); ok {
 						timing.Events = append(timing.Events, parsed)
 					}
-				case "traf":
+				case boxTraf:
 					timing.Samples = append(timing.Samples, parseTrafSamples(init, child.payload, len(data))...)
 				}
+				return true
+			})
+		}
+		return true
+	})
+	return timing, nil
+}
+
+// ParseFragmentReader extracts fragment timing while streaming top-level boxes.
+// It buffers only boxes that can carry timing/events (moof, emsg) and discards
+// large media-data boxes such as mdat.
+func ParseFragmentReader(init InitInfo, r io.Reader, maxBytes int) (FragmentTiming, error) {
+	var timing FragmentTiming
+	if maxBytes <= 0 {
+		return timing, fmt.Errorf("fragment too large: exceeds %d bytes", maxBytes)
+	}
+
+	lr := &io.LimitedReader{R: r, N: int64(maxBytes) + 1}
+	for {
+		box, ok, err := readStreamBox(lr)
+		if err != nil {
+			return FragmentTiming{}, err
+		}
+		if !ok {
+			break
+		}
+		if lr.N == 0 {
+			return FragmentTiming{}, fmt.Errorf("fragment too large: exceeds %d bytes", maxBytes)
+		}
+		switch box.typ {
+		case boxEmsg:
+			payload, err := readStreamBoxPayload(lr, box.payloadSize)
+			if err != nil {
+				return FragmentTiming{}, err
 			}
+			if parsed, ok := parseEMSG(payload); ok {
+				timing.Events = append(timing.Events, parsed)
+			}
+		case boxMoof:
+			payload, err := readStreamBoxPayload(lr, box.payloadSize)
+			if err != nil {
+				return FragmentTiming{}, err
+			}
+			walkBoxes(payload, func(child boxHeader) bool {
+				switch child.typ {
+				case boxEmsg:
+					if parsed, ok := parseEMSG(child.payload); ok {
+						timing.Events = append(timing.Events, parsed)
+					}
+				case boxTraf:
+					timing.Samples = append(timing.Samples, parseTrafSamples(init, child.payload, maxBytes)...)
+				}
+				return true
+			})
+		default:
+			if err := discardStreamBoxPayload(lr, box.payloadSize); err != nil {
+				return FragmentTiming{}, err
+			}
+		}
+		if lr.N == 0 {
+			return FragmentTiming{}, fmt.Errorf("fragment too large: exceeds %d bytes", maxBytes)
 		}
 	}
 	return timing, nil
+}
+
+type streamBoxHeader struct {
+	typ         uint32
+	payloadSize uint64
+}
+
+func readStreamBox(r *io.LimitedReader) (streamBoxHeader, bool, error) {
+	header := make([]byte, 8)
+	n, err := io.ReadFull(r, header)
+	if err != nil {
+		if err == io.EOF && n == 0 {
+			return streamBoxHeader{}, false, nil
+		}
+		return streamBoxHeader{}, false, err
+	}
+	size := uint64(binary.BigEndian.Uint32(header[:4]))
+	headerSize := uint64(8)
+	if size == 1 {
+		extended := make([]byte, 8)
+		if _, err := io.ReadFull(r, extended); err != nil {
+			return streamBoxHeader{}, false, err
+		}
+		size = binary.BigEndian.Uint64(extended)
+		headerSize = 16
+	} else if size == 0 {
+		size = uint64(r.N) + headerSize
+	}
+	if size < headerSize {
+		return streamBoxHeader{}, false, fmt.Errorf("invalid fMP4 box size %d", size)
+	}
+	return streamBoxHeader{
+		typ:         binary.BigEndian.Uint32(header[4:8]),
+		payloadSize: size - headerSize,
+	}, true, nil
+}
+
+func readStreamBoxPayload(r *io.LimitedReader, size uint64) ([]byte, error) {
+	if size > uint64(r.N) || size > uint64(int(^uint(0)>>1)) {
+		return nil, io.ErrUnexpectedEOF
+	}
+	payload := make([]byte, int(size))
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
+func discardStreamBoxPayload(r *io.LimitedReader, size uint64) error {
+	if size > uint64(r.N) {
+		return io.ErrUnexpectedEOF
+	}
+	_, err := io.CopyN(io.Discard, r, int64(size))
+	return err
 }
 
 func parseTrafSamples(init InitInfo, data []byte, fragmentSize int) []SampleTiming {
@@ -220,36 +358,39 @@ func readCString(data []byte) (string, []byte, bool) {
 
 func parseTrack(data []byte) (trackBuilder, bool) {
 	var track trackBuilder
-	for _, child := range parseBoxes(data) {
+	walkBoxes(data, func(child boxHeader) bool {
 		switch child.typ {
-		case "tkhd":
+		case boxTkhd:
 			track.id = parseVersionedUint32(child.payload)
-		case "mdia":
-			for _, mdiaChild := range parseBoxes(child.payload) {
+		case boxMdia:
+			walkBoxes(child.payload, func(mdiaChild boxHeader) bool {
 				switch mdiaChild.typ {
-				case "mdhd":
+				case boxMdhd:
 					track.timescale = parseVersionedUint32(mdiaChild.payload)
-				case "hdlr":
+				case boxHdlr:
 					track.handler = parseHDLRHandler(mdiaChild.payload)
 				}
-			}
+				return true
+			})
 		}
-	}
+		return true
+	})
 	return track, track.id != 0 || track.timescale != 0 || track.handler != ""
 }
 
 func parseTraf(data []byte) trafBuilder {
 	var frag trafBuilder
-	for _, child := range parseBoxes(data) {
+	walkBoxes(data, func(child boxHeader) bool {
 		switch child.typ {
-		case "tfhd":
+		case boxTfhd:
 			frag.trackID, frag.defaultSampleDuration = parseTFHD(child.payload)
-		case "tfdt":
+		case boxTfdt:
 			frag.baseDecodeTime = parseTFDTBaseDecodeTime(child.payload)
-		case "trun":
+		case boxTrun:
 			frag.sampleCount, frag.durations = parseTRUN(child.payload)
 		}
-	}
+		return true
+	})
 	return frag
 }
 
@@ -353,18 +494,7 @@ func parseTRUN(data []byte) (int, []uint32) {
 	return sampleCount, durations
 }
 
-func boxesOfType(data []byte, typ string) []boxHeader {
-	var out []boxHeader
-	for _, box := range parseBoxes(data) {
-		if box.typ == typ {
-			out = append(out, box)
-		}
-	}
-	return out
-}
-
-func parseBoxes(data []byte) []boxHeader {
-	boxes := make([]boxHeader, 0, 8)
+func walkBoxes(data []byte, visit func(boxHeader) bool) {
 	for len(data) >= 8 {
 		size := uint64(binary.BigEndian.Uint32(data[:4]))
 		headerSize := uint64(8)
@@ -382,12 +512,13 @@ func parseBoxes(data []byte) []boxHeader {
 		if size < headerSize || size > uint64(len(data)) {
 			break
 		}
-		typ := string(data[4:8])
-		boxes = append(boxes, boxHeader{
-			typ:     typ,
+		box := boxHeader{
+			typ:     binary.BigEndian.Uint32(data[4:8]),
 			payload: data[headerSize:size],
-		})
+		}
+		if !visit(box) {
+			return
+		}
 		data = data[size:]
 	}
-	return boxes
 }

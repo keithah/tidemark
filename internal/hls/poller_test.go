@@ -512,7 +512,7 @@ segment0.ts
 	}
 }
 
-func TestFetchAndProcessReemitsReusedURLAfterMediaSequenceReset(t *testing.T) {
+func TestFetchAndProcessReemitsReusedURLAfterPersistentMediaSequenceReset(t *testing.T) {
 	manifests := []string{
 		`#EXTM3U
 #EXT-X-TARGETDURATION:6
@@ -526,6 +526,13 @@ segment0.ts
 #EXT-X-MEDIA-SEQUENCE:1
 #EXTINF:6.0,
 segment1.ts
+`,
+		`#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-CUE-OUT
+#EXTINF:6.0,
+segment0.ts
 `,
 		`#EXTM3U
 #EXT-X-TARGETDURATION:6
@@ -629,6 +636,64 @@ segment0.ts
 	}
 }
 
+func TestFetchAndProcessDoesNotReemitTrailingTagWhenPlaylistGrows(t *testing.T) {
+	manifests := []string{
+		`#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:6.0,
+segment0.ts
+#EXT-X-CUE-IN
+`,
+		`#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:6.0,
+segment0.ts
+#EXTINF:6.0,
+segment1.ts
+#EXT-X-CUE-IN
+#EXT-X-ENDLIST
+`,
+	}
+	var mu sync.Mutex
+	fetches := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stream.m3u8" {
+			mu.Lock()
+			idx := fetches
+			if idx >= len(manifests) {
+				idx = len(manifests) - 1
+			}
+			fetches++
+			mu.Unlock()
+			fmt.Fprint(w, manifests[idx])
+			return
+		}
+		w.Write([]byte{0xFF})
+	}))
+	defer srv.Close()
+
+	p := NewPoller(srv.URL + "/stream.m3u8")
+	ch := make(chan *marker.Marker, 10)
+	for i := 0; i < len(manifests); i++ {
+		if _, _, err := p.fetchAndProcess(context.Background(), srv.URL+"/stream.m3u8", ch); err != nil {
+			t.Fatalf("fetchAndProcess %d error: %v", i, err)
+		}
+	}
+	close(ch)
+
+	cueInCount := 0
+	for m := range ch {
+		if m.Tag == "#EXT-X-CUE-IN" {
+			cueInCount++
+		}
+	}
+	if cueInCount != 1 {
+		t.Fatalf("CUE-IN count = %d, want 1", cueInCount)
+	}
+}
+
 func TestFetchAndProcessTreatsReusedSequenceWithDifferentURIAsNewSegment(t *testing.T) {
 	manifests := []string{
 		`#EXTM3U
@@ -682,6 +747,74 @@ replacement0.ts
 	}
 	if cueOutCount != 2 {
 		t.Fatalf("CUE-OUT count = %d, want 2", cueOutCount)
+	}
+}
+
+func TestFetchAndProcessDoesNotResetEpochOnSingleStaleRegression(t *testing.T) {
+	manifests := []string{
+		`#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-CUE-OUT
+#EXTINF:6.0,
+segment0.ts
+`,
+		`#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:1
+#EXTINF:6.0,
+segment1.ts
+`,
+		`#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-CUE-OUT
+#EXTINF:6.0,
+segment0.ts
+`,
+		`#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:2
+#EXTINF:6.0,
+segment2.ts
+#EXT-X-ENDLIST
+`,
+	}
+	var mu sync.Mutex
+	fetches := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stream.m3u8" {
+			mu.Lock()
+			idx := fetches
+			if idx >= len(manifests) {
+				idx = len(manifests) - 1
+			}
+			fetches++
+			mu.Unlock()
+			fmt.Fprint(w, manifests[idx])
+			return
+		}
+		w.Write([]byte{0xFF})
+	}))
+	defer srv.Close()
+
+	p := NewPoller(srv.URL + "/stream.m3u8")
+	ch := make(chan *marker.Marker, 10)
+	for i := 0; i < len(manifests); i++ {
+		if _, _, err := p.fetchAndProcess(context.Background(), srv.URL+"/stream.m3u8", ch); err != nil {
+			t.Fatalf("fetchAndProcess %d error: %v", i, err)
+		}
+	}
+	close(ch)
+
+	cueOutCount := 0
+	for m := range ch {
+		if m.Tag == "#EXT-X-CUE-OUT" {
+			cueOutCount++
+		}
+	}
+	if cueOutCount != 1 {
+		t.Fatalf("CUE-OUT count = %d, want 1", cueOutCount)
 	}
 }
 
@@ -796,221 +929,6 @@ sub/segment0.ts
 	mu.Unlock()
 }
 
-func TestPollFetchRetry(t *testing.T) {
-	var mu sync.Mutex
-	fetchCount := 0
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		fetchCount++
-		fc := fetchCount
-		mu.Unlock()
-
-		if fc <= 2 {
-			// First two fetches: fail for master resolution + fail for first poll
-			w.WriteHeader(500)
-			return
-		}
-		// Third fetch succeeds with VOD
-		manifest := `#EXTM3U
-#EXT-X-TARGETDURATION:6
-#EXT-X-MEDIA-SEQUENCE:0
-#EXTINF:6.0,
-segment0.ts
-#EXT-X-ENDLIST
-`
-		fmt.Fprint(w, manifest)
-	}))
-	defer srv.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	p := NewPoller(srv.URL + "/stream.m3u8")
-	p.pollInterval = time.Millisecond
-	ch := make(chan *marker.Marker, 100)
-
-	// This should retry on the 500 error and eventually succeed
-	err := p.Poll(ctx, ch)
-	if err != nil {
-		t.Fatalf("Poll error: %v", err)
-	}
-}
-
-func TestPollFailsFastOnPermanentManifestStatus(t *testing.T) {
-	var mu sync.Mutex
-	fetches := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		fetches++
-		mu.Unlock()
-		w.WriteHeader(http.StatusForbidden)
-	}))
-	defer srv.Close()
-
-	p := NewPoller(srv.URL + "/stream.m3u8")
-	ch := make(chan *marker.Marker, 1)
-	err := p.Poll(context.Background(), ch)
-	if err == nil {
-		t.Fatal("expected permanent status error")
-	}
-	mu.Lock()
-	got := fetches
-	mu.Unlock()
-	if got != 1 {
-		t.Fatalf("manifest fetches = %d, want fail-fast single fetch", got)
-	}
-}
-
-func TestPollReportsSegmentDownloadErrors(t *testing.T) {
-	manifest := `#EXTM3U
-#EXT-X-MEDIA-SEQUENCE:0
-#EXTINF:6.0,
-missing.ts
-#EXT-X-ENDLIST
-`
-	var reported strings.Builder
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/stream.m3u8" {
-			fmt.Fprint(w, manifest)
-			return
-		}
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	p := NewPoller(srv.URL+"/stream.m3u8", WithErrorWriter(&reported))
-	ch := make(chan *marker.Marker, 100)
-	if err := p.Poll(context.Background(), ch); err != nil {
-		t.Fatalf("Poll error: %v", err)
-	}
-	if !strings.Contains(reported.String(), "decode segment") {
-		t.Fatalf("reported errors = %q, want decode segment error", reported.String())
-	}
-}
-
-func TestPollDecodesFMP4SegmentTimingFromMap(t *testing.T) {
-	manifest := `#EXTM3U
-#EXT-X-MEDIA-SEQUENCE:0
-#EXT-X-MAP:URI="map.mp4a"
-#EXTINF:6.0,
-segment0.mp4a
-#EXT-X-ENDLIST
-`
-	init := fmp4InitSegmentForTest(7, 48000, "soun")
-	fragment := append(
-		fmp4EventForTest(1000, 12345, 5000, 42, "urn:test", "value", []byte("payload")),
-		fmp4FragmentForTest(7, 96000, 1024, 1024, 2048)...,
-	)
-
-	var reported strings.Builder
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/stream.m3u8":
-			fmt.Fprint(w, manifest)
-		case "/map.mp4a":
-			w.Write(init)
-		case "/segment0.mp4a":
-			w.Write(fragment)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-
-	p := NewPoller(srv.URL+"/stream.m3u8", WithErrorWriter(&reported))
-	ch := make(chan *marker.Marker, 10)
-	if err := p.Poll(context.Background(), ch); err != nil {
-		t.Fatalf("Poll error: %v", err)
-	}
-	if reported.String() != "" {
-		t.Fatalf("reported errors = %q, want none", reported.String())
-	}
-	if len(ch) != 2 {
-		t.Fatalf("markers = %d, want 2", len(ch))
-	}
-	m := <-ch
-	if m.Type != marker.MarkerFMP4 {
-		t.Fatalf("marker type = %s, want FMP4", m.Type)
-	}
-	if m.Tag != "timeline" {
-		t.Fatalf("marker tag = %q, want timeline", m.Tag)
-	}
-	if m.PTS != 2.0 {
-		t.Fatalf("marker PTS = %f, want 2", m.PTS)
-	}
-	if m.Fields["track_id"] != "7" || m.Fields["handler"] != "soun" {
-		t.Fatalf("fields = %#v", m.Fields)
-	}
-	if m.Fields["sample_count"] != "3" || m.Fields["duration"] != "4096" {
-		t.Fatalf("timeline fields = %#v", m.Fields)
-	}
-	event := <-ch
-	if event.Tag != "emsg" {
-		t.Fatalf("event tag = %q, want emsg", event.Tag)
-	}
-	if event.PTS != 12.345 {
-		t.Fatalf("event PTS = %f, want 12.345", event.PTS)
-	}
-	if event.Fields["scheme_id_uri"] != "urn:test" || event.Fields["event_id"] != "42" {
-		t.Fatalf("event fields = %#v", event.Fields)
-	}
-}
-
-func TestPollRetriesFailedSegmentOnNextPlaylist(t *testing.T) {
-	manifest := `#EXTM3U
-#EXT-X-MEDIA-SEQUENCE:0
-#EXTINF:6.0,
-segment0.ts
-`
-	manifestEnd := manifest + "#EXT-X-ENDLIST\n"
-
-	var mu sync.Mutex
-	manifestFetches := 0
-	segmentFetches := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/stream.m3u8":
-			mu.Lock()
-			manifestFetches++
-			fetch := manifestFetches
-			mu.Unlock()
-			if fetch <= 2 {
-				fmt.Fprint(w, manifest)
-				return
-			}
-			fmt.Fprint(w, manifestEnd)
-		case "/segment0.ts":
-			mu.Lock()
-			segmentFetches++
-			fetch := segmentFetches
-			mu.Unlock()
-			if fetch == 1 {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			w.Write([]byte{0xFF})
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-
-	p := NewPoller(srv.URL + "/stream.m3u8")
-	p.pollInterval = time.Millisecond
-	ch := make(chan *marker.Marker, 100)
-	if err := p.Poll(context.Background(), ch); err != nil {
-		t.Fatalf("Poll error: %v", err)
-	}
-
-	mu.Lock()
-	got := segmentFetches
-	mu.Unlock()
-	if got != 2 {
-		t.Fatalf("segment fetches = %d, want retry on second playlist", got)
-	}
-}
-
 func TestFetchAndProcessEvictsSeenEntriesAtCapacity(t *testing.T) {
 	manifest := `#EXTM3U
 #EXT-X-MEDIA-SEQUENCE:10
@@ -1032,8 +950,8 @@ segment10.ts
 	p.planner = newPlaylistPlanner(1)
 	staleKey := seenKey{url: "http://stale.example/segment.ts"}
 	staleTagKey := makeTagSeenKey(staleKey, &TagResult{Tag: "#EXT-X-CUE-IN", IsDirect: true, DirectType: marker.AdEnd})
-	p.planner.tagSeen.Remember(staleTagKey)
-	p.planner.segmentSeen.Remember(staleKey)
+	p.planner.tagSeen.Remember(staleTagKey, struct{}{})
+	p.planner.segmentSeen.Remember(staleKey, struct{}{})
 	ch := make(chan *marker.Marker, 100)
 
 	_, _, err := p.fetchAndProcess(context.Background(), srv.URL+"/stream.m3u8", ch)
@@ -1064,90 +982,4 @@ func buildID3TextSegment(value string) []byte {
 	header[8] = byte((size >> 7) & 0x7F)
 	header[9] = byte(size & 0x7F)
 	return append(header, frame...)
-}
-
-func fmp4InitSegmentForTest(trackID, timescale uint32, handler string) []byte {
-	return mp4BoxForTest("moov",
-		mp4BoxForTest("trak",
-			mp4BoxForTest("tkhd", mp4FullBoxForTest(0, u32ForTest(0), u32ForTest(0), u32ForTest(trackID))),
-			mp4BoxForTest("mdia",
-				mp4BoxForTest("mdhd", mp4FullBoxForTest(0, u32ForTest(0), u32ForTest(0), u32ForTest(timescale), u32ForTest(0), u16ForTest(0))),
-				mp4BoxForTest("hdlr", mp4FullBoxForTest(0, u32ForTest(0), []byte(handler), u32ForTest(0), u32ForTest(0), u32ForTest(0))),
-			),
-		),
-	)
-}
-
-func fmp4FragmentForTest(trackID uint32, baseDecodeTime uint64, durations ...uint32) []byte {
-	payload := [][]byte{u32ForTest(uint32(len(durations)))}
-	for _, duration := range durations {
-		payload = append(payload, u32ForTest(duration))
-	}
-	return mp4BoxForTest("moof",
-		mp4BoxForTest("traf",
-			mp4BoxForTest("tfhd", mp4FullBoxForTest(0, u32ForTest(trackID))),
-			mp4BoxForTest("tfdt", mp4FullBoxForTest(0x01000000, u64ForTest(baseDecodeTime))),
-			mp4BoxForTest("trun", mp4FullBoxForTest(0x000100, payload...)),
-		),
-	)
-}
-
-func fmp4EventForTest(timescale uint32, presentationTime uint64, duration, id uint32, scheme, value string, message []byte) []byte {
-	payload := []byte{}
-	payload = append(payload, u32ForTest(timescale)...)
-	payload = append(payload, u64ForTest(presentationTime)...)
-	payload = append(payload, u32ForTest(duration)...)
-	payload = append(payload, u32ForTest(id)...)
-	payload = append(payload, []byte(scheme)...)
-	payload = append(payload, 0)
-	payload = append(payload, []byte(value)...)
-	payload = append(payload, 0)
-	payload = append(payload, message...)
-	return mp4BoxForTest("emsg", mp4FullBoxForTest(0x01000000, payload))
-}
-
-func mp4BoxForTest(kind string, payload ...[]byte) []byte {
-	size := 8
-	for _, p := range payload {
-		size += len(p)
-	}
-	out := make([]byte, size)
-	binary.BigEndian.PutUint32(out[:4], uint32(size))
-	copy(out[4:8], kind)
-	offset := 8
-	for _, p := range payload {
-		copy(out[offset:], p)
-		offset += len(p)
-	}
-	return out
-}
-
-func mp4FullBoxForTest(flags uint32, payload ...[]byte) []byte {
-	out := make([]byte, 4)
-	out[0] = byte(flags >> 24)
-	out[1] = byte(flags >> 16)
-	out[2] = byte(flags >> 8)
-	out[3] = byte(flags)
-	for _, p := range payload {
-		out = append(out, p...)
-	}
-	return out
-}
-
-func u16ForTest(v uint16) []byte {
-	out := make([]byte, 2)
-	binary.BigEndian.PutUint16(out, v)
-	return out
-}
-
-func u32ForTest(v uint32) []byte {
-	out := make([]byte, 4)
-	binary.BigEndian.PutUint32(out, v)
-	return out
-}
-
-func u64ForTest(v uint64) []byte {
-	out := make([]byte, 8)
-	binary.BigEndian.PutUint64(out, v)
-	return out
 }

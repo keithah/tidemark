@@ -192,7 +192,7 @@ func sanitize(data []byte) string {
 func parseFields(meta string) map[string]string {
 	fields := make(map[string]string, strings.Count(meta, ";")+1)
 	for len(meta) > 0 {
-		part, rest := cutFieldOutsideQuotes(meta)
+		part, rest := cutICYField(meta)
 		meta = rest
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -210,19 +210,15 @@ func parseFields(meta string) map[string]string {
 	return fields
 }
 
-// cutFieldOutsideQuotes splits meta at the first ';' that is not inside a
-// single-quoted value, returning the field and the remainder.
-func cutFieldOutsideQuotes(meta string) (field, rest string) {
-	inQuote := false
-	for i := 0; i < len(meta); i++ {
-		switch meta[i] {
-		case '\'':
-			inQuote = !inQuote
-		case ';':
-			if !inQuote {
-				return meta[:i], meta[i+1:]
-			}
-		}
+// cutICYField splits at the ICY field terminator. StreamTitle values are
+// conventionally single-quoted, but apostrophes inside titles are common and do
+// not escape consistently, so treat "';" as the reliable field boundary.
+func cutICYField(meta string) (field, rest string) {
+	if end := strings.Index(meta, "';"); end >= 0 {
+		return meta[:end+1], meta[end+2:]
+	}
+	if end := strings.IndexByte(meta, ';'); end >= 0 {
+		return meta[:end], meta[end+1:]
 	}
 	return meta, ""
 }

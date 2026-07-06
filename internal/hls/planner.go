@@ -10,12 +10,14 @@ import (
 )
 
 type playlistPlanner struct {
-	tagSeen     *seenWindow[tagSeenKey]
-	segmentSeen *seenWindow[seenKey]
-	urls        *urlCache
-	epoch       int
-	lastFirst   int
-	haveFirst   bool
+	tagSeen        *boundedMap[tagSeenKey, struct{}]
+	segmentSeen    *boundedMap[seenKey, struct{}]
+	urls           *boundedMap[string, string]
+	epoch          int
+	lastFirst      int
+	haveFirst      bool
+	regressedFirst int
+	haveRegression bool
 }
 
 type seenKey struct {
@@ -30,13 +32,14 @@ type tagSeenKey struct {
 	isDirect   bool
 	directType marker.Classification
 	attrs      string
+	trailing   bool
 }
 
 func newPlaylistPlanner(limit int) playlistPlanner {
 	return playlistPlanner{
-		tagSeen:     newSeenWindow[tagSeenKey](limit),
-		segmentSeen: newSeenWindow[seenKey](limit),
-		urls:        newURLCache(limit),
+		tagSeen:     newBoundedMap[tagSeenKey, struct{}](limit),
+		segmentSeen: newBoundedMap[seenKey, struct{}](limit),
+		urls:        newBoundedMap[string, string](limit),
 	}
 }
 
@@ -63,7 +66,7 @@ func (p *playlistPlanner) plan(manifestURL string, playlist Playlist) ([]segment
 			tagKey := makeTagSeenKey(seenKey, tag)
 			if !p.tagSeen.Has(tagKey) {
 				plan.tags = append(plan.tags, tag)
-				p.tagSeen.Remember(tagKey)
+				p.tagSeen.Remember(tagKey, struct{}{})
 			}
 		}
 		if _, ok := scheduled[seenKey]; !ok && !p.segmentSeen.Has(seenKey) {
@@ -82,8 +85,19 @@ func (p *playlistPlanner) rememberPlaylistEpoch(playlist Playlist) {
 	}
 	first := playlist.Segments[0].Sequence
 	if p.haveFirst && first < p.lastFirst {
+		if !p.haveRegression || p.regressedFirst != first {
+			p.regressedFirst = first
+			p.haveRegression = true
+			return
+		}
 		p.epoch++
+		p.haveRegression = false
+		p.regressedFirst = 0
+		p.lastFirst = first
+		return
 	}
+	p.haveRegression = false
+	p.regressedFirst = 0
 	p.lastFirst = first
 	p.haveFirst = true
 }
@@ -103,12 +117,15 @@ func (p *playlistPlanner) seenKey(url string) seenKey {
 }
 
 func (p *playlistPlanner) rememberDecodedSegment(key seenKey) {
-	p.segmentSeen.Remember(key)
+	p.segmentSeen.Remember(key, struct{}{})
 }
 
 func makeTagSeenKey(key seenKey, tag *TagResult) tagSeenKey {
 	if tag == nil {
 		return tagSeenKey{seenKey: key}
+	}
+	if tag.Trailing {
+		key.url = ""
 	}
 	return tagSeenKey{
 		seenKey:    key,
@@ -117,6 +134,7 @@ func makeTagSeenKey(key seenKey, tag *TagResult) tagSeenKey {
 		isDirect:   tag.IsDirect,
 		directType: tag.DirectType,
 		attrs:      tagAttributeIdentity(tag.Attributes),
+		trailing:   tag.Trailing,
 	}
 }
 
@@ -160,68 +178,35 @@ type segmentResult struct {
 	err     error
 }
 
-type seenWindow[K comparable] struct {
+type boundedMap[K comparable, V any] struct {
 	limit int
-	seen  map[K]struct{}
+	items map[K]V
 	order []K
 	next  int
 }
 
-func newSeenWindow[K comparable](limit int) *seenWindow[K] {
+func newBoundedMap[K comparable, V any](limit int) *boundedMap[K, V] {
 	if limit <= 0 {
 		limit = defaultSeenLimit
 	}
-	return &seenWindow[K]{
+	return &boundedMap[K, V]{
 		limit: limit,
-		seen:  make(map[K]struct{}, limit),
+		items: make(map[K]V, limit),
 		order: make([]K, 0, limit),
 	}
 }
 
-func (w *seenWindow[K]) Has(key K) bool {
-	_, ok := w.seen[key]
-	return ok
-}
-
-func (w *seenWindow[K]) Remember(key K) {
-	if _, ok := w.seen[key]; ok {
-		return
-	}
-	if len(w.order) < w.limit {
-		w.order = append(w.order, key)
-	} else {
-		old := w.order[w.next]
-		delete(w.seen, old)
-		w.order[w.next] = key
-		w.next = (w.next + 1) % w.limit
-	}
-	w.seen[key] = struct{}{}
-}
-
-type urlCache struct {
-	limit int
-	items map[string]string
-	order []string
-	next  int
-}
-
-func newURLCache(limit int) *urlCache {
-	if limit <= 0 {
-		limit = defaultSeenLimit
-	}
-	return &urlCache{
-		limit: limit,
-		items: make(map[string]string, limit),
-		order: make([]string, 0, limit),
-	}
-}
-
-func (c *urlCache) Get(key string) (string, bool) {
+func (c *boundedMap[K, V]) Get(key K) (V, bool) {
 	value, ok := c.items[key]
 	return value, ok
 }
 
-func (c *urlCache) Remember(key, value string) {
+func (c *boundedMap[K, V]) Has(key K) bool {
+	_, ok := c.items[key]
+	return ok
+}
+
+func (c *boundedMap[K, V]) Remember(key K, value V) {
 	if _, ok := c.items[key]; ok {
 		c.items[key] = value
 		return

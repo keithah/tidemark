@@ -33,9 +33,17 @@ type SegmentResult struct {
 
 // NewDecoder creates a new MPEGTS decoder.
 func NewDecoder() *Decoder {
+	return &Decoder{stream: newCueiStream()}
+}
+
+func newCueiStream() *cuei.Stream {
 	s := cuei.NewStream()
 	s.Quiet = true
-	return &Decoder{stream: s}
+	return s
+}
+
+func (d *Decoder) Reset() {
+	d.stream = newCueiStream()
 }
 
 // DecodeBuf decodes SCTE-35 from a raw MPEGTS buffer.
@@ -44,9 +52,11 @@ func (d *Decoder) DecodeBuf(data []byte) (markers []*marker.Marker, err error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
+	data = cloneDecodeData(data)
 
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			d.Reset()
 			markers = nil
 			err = fmt.Errorf("decode MPEGTS: %v", recovered)
 		}
@@ -62,6 +72,10 @@ func (d *Decoder) DecodeBuf(data []byte) (markers []*marker.Marker, err error) {
 	}
 
 	return markers, nil
+}
+
+func cloneDecodeData(data []byte) []byte {
+	return append([]byte(nil), data...)
 }
 
 // DecodeSegment extracts SCTE-35 and timed-ID3 markers from one segment. For
@@ -86,7 +100,7 @@ func (d *Decoder) DecodeSegment(data []byte) (SegmentResult, error) {
 // DecodeSegmentReader streams one finite MPEG-TS segment and extracts SCTE-35
 // plus timed ID3 without buffering the whole segment first.
 func (d *Decoder) DecodeSegmentReader(ctx context.Context, r io.Reader) (SegmentResult, error) {
-	buf := make([]byte, tsPacketSize*350)
+	buf := make([]byte, tsPacketSize*350+tsPacketSize-1)
 	var leftover []byte
 	var extractor id3.MPEGTSExtractor
 	var result SegmentResult
@@ -98,14 +112,11 @@ func (d *Decoder) DecodeSegmentReader(ctx context.Context, r io.Reader) (Segment
 		default:
 		}
 
-		n, err := r.Read(buf)
-		if n > 0 {
-			data := buf[:n]
-			if len(leftover) > 0 {
-				data = append(leftover, data...)
-			}
+		prefix := copy(buf, leftover)
+		n, err := r.Read(buf[prefix:])
+		if prefix+n > 0 {
+			data := buf[:prefix+n]
 			packets, rest := alignPackets(data)
-			leftover = append(leftover[:0], rest...)
 			if len(packets) > 0 {
 				for i := 0; i+tsPacketSize <= len(packets); i += tsPacketSize {
 					extractor.PushPacket(packets[i : i+tsPacketSize])
@@ -116,6 +127,7 @@ func (d *Decoder) DecodeSegmentReader(ctx context.Context, r io.Reader) (Segment
 				}
 				result.SCTE35 = append(result.SCTE35, markers...)
 			}
+			leftover = append(leftover[:0], rest...)
 		}
 		if err == io.EOF {
 			result.ID3 = extractor.Groups()
@@ -136,7 +148,7 @@ func (d *Decoder) DecodeReader(ctx context.Context, r io.Reader, ch chan<- *mark
 	stopCloseOnCancel := closeOnCancel(ctx, r)
 	defer stopCloseOnCancel()
 
-	buf := make([]byte, tsPacketSize*350) // ~64KB, a whole number of TS packets
+	buf := make([]byte, tsPacketSize*350+tsPacketSize-1)
 
 	// leftover holds bytes that did not form a complete, sync-aligned packet on
 	// the previous read. Readers (notably net/http) do not guarantee that each
@@ -153,17 +165,12 @@ func (d *Decoder) DecodeReader(ctx context.Context, r io.Reader, ch chan<- *mark
 		default:
 		}
 
-		n, err := r.Read(buf)
-		if n > 0 {
-			data := buf[:n]
-			if len(leftover) > 0 {
-				data = append(leftover, data...)
-			}
+		prefix := copy(buf, leftover)
+		n, err := r.Read(buf[prefix:])
+		if prefix+n > 0 {
+			data := buf[:prefix+n]
 
 			packets, rest := alignPackets(data)
-			// Copy the remainder into its own backing array; `rest` aliases
-			// either buf or the appended slice, both of which get reused.
-			leftover = append(leftover[:0], rest...)
 
 			if len(packets) > 0 {
 				markers, derr := d.DecodeBuf(packets)
@@ -176,6 +183,10 @@ func (d *Decoder) DecodeReader(ctx context.Context, r io.Reader, ch chan<- *mark
 					}
 				}
 			}
+			// Copy the remainder into its own backing array after consumers have
+			// finished with packets; when `data` was appended to leftover, this
+			// write can share a backing array with packets.
+			leftover = append(leftover[:0], rest...)
 		}
 		if err == io.EOF {
 			return nil

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/keithah/tidemark/internal/backoff"
 	"github.com/keithah/tidemark/internal/classifier"
 	"github.com/keithah/tidemark/internal/detector"
 	"github.com/keithah/tidemark/internal/hls"
@@ -36,6 +37,7 @@ type Config struct {
 	Version    bool
 	JSONOut    string
 	Timeout    int
+	MaxRetries int
 	Filter     string
 	FilterType marker.MarkerType
 	HasFilter  bool
@@ -46,6 +48,7 @@ type markerProducer func(context.Context, chan<- *marker.Marker) error
 const (
 	sourceInitialRetryDelay = time.Second
 	sourceMaxRetryDelay     = 30 * time.Second
+	defaultMaxRetries       = 10
 )
 
 func main() {
@@ -114,6 +117,7 @@ func parseFlags(args []string) (*Config, string, context.Context, context.Cancel
 	fs.BoolVar(&cfg.Quiet, "quiet", false, "Summary lines only, suppress JSON blocks")
 	fs.StringVar(&cfg.JSONOut, "json-out", "", "Write all marker JSON to FILE (NDJSON)")
 	fs.IntVar(&cfg.Timeout, "timeout", 0, "Stop after N seconds (0=run until Ctrl+C)")
+	fs.IntVar(&cfg.MaxRetries, "max-retries", defaultMaxRetries, "Max consecutive transient source failures before exiting (0=retry forever)")
 	fs.StringVar(&cfg.Filter, "filter", "", "Only show markers of type: scte35 | id3 | icy | fmp4")
 	fs.BoolVar(&cfg.Version, "version", false, "Print version and exit")
 
@@ -121,9 +125,24 @@ func parseFlags(args []string) (*Config, string, context.Context, context.Cancel
 		return nil, "", nil, func() {}, err
 	}
 
+	if fs.NArg() > 1 {
+		for _, arg := range fs.Args()[1:] {
+			if strings.HasPrefix(arg, "-") {
+				return nil, "", nil, func() {}, fmt.Errorf("flags must appear before URL: %s", arg)
+			}
+		}
+		return nil, "", nil, func() {}, fmt.Errorf("unexpected argument: %s", fs.Arg(1))
+	}
+
 	// Validate
 	if cfg.JSON && cfg.Quiet {
 		return nil, "", nil, func() {}, fmt.Errorf("--json and --quiet are mutually exclusive")
+	}
+	if cfg.Timeout < 0 {
+		return nil, "", nil, func() {}, fmt.Errorf("--timeout must be >= 0")
+	}
+	if cfg.MaxRetries < 0 {
+		return nil, "", nil, func() {}, fmt.Errorf("--max-retries must be >= 0")
 	}
 
 	if cfg.Filter != "" {
@@ -171,6 +190,11 @@ func printBanner(w io.Writer, url string, streamType marker.StreamType, cfg *Con
 	fmt.Fprintf(w, "[tidemark] output: %s\n", mode)
 	if cfg.JSONOut != "" {
 		fmt.Fprintf(w, "[tidemark] json-out: %s\n", cfg.JSONOut)
+	}
+	if cfg.MaxRetries > 0 {
+		fmt.Fprintf(w, "[tidemark] max retries: %d\n", cfg.MaxRetries)
+	} else {
+		fmt.Fprintln(w, "[tidemark] max retries: forever")
 	}
 	fmt.Fprintln(w, "─────────────────────────────────────────")
 }
@@ -231,6 +255,13 @@ func runMarkerSource(ctx context.Context, cfg *Config, producer markerProducer) 
 		if m.Classification == marker.Unknown {
 			m.Classification = cls.Classify(m)
 		}
+		if jout != nil {
+			if err := jout.Write(m); err != nil {
+				outputErr = fmt.Errorf("write json-out: %w", err)
+				cancel()
+				break
+			}
+		}
 		if shouldFilter(m, cfg) {
 			continue
 		}
@@ -252,13 +283,6 @@ func runMarkerSource(ctx context.Context, cfg *Config, producer markerProducer) 
 			outputErr = fmt.Errorf("output marker: %w", err)
 			cancel()
 			break
-		}
-		if jout != nil {
-			if err := jout.Write(m); err != nil {
-				outputErr = fmt.Errorf("write json-out: %w", err)
-				cancel()
-				break
-			}
 		}
 	}
 
@@ -282,8 +306,33 @@ func runMarkerSource(ctx context.Context, cfg *Config, producer markerProducer) 
 }
 
 func retryingProducer(producer markerProducer, initialDelay, maxDelay time.Duration) markerProducer {
+	return retryingProducerWithPolicy(producer, retryPolicy{
+		InitialDelay: initialDelay,
+		MaxDelay:     maxDelay,
+		MaxFailures:  defaultMaxRetries,
+		ErrorWriter:  os.Stderr,
+	})
+}
+
+func retryingProducerWithErrorWriter(producer markerProducer, initialDelay, maxDelay time.Duration, errw io.Writer) markerProducer {
+	return retryingProducerWithPolicy(producer, retryPolicy{
+		InitialDelay: initialDelay,
+		MaxDelay:     maxDelay,
+		ErrorWriter:  errw,
+	})
+}
+
+type retryPolicy struct {
+	InitialDelay time.Duration
+	MaxDelay     time.Duration
+	MaxFailures  int
+	ErrorWriter  io.Writer
+}
+
+func retryingProducerWithPolicy(producer markerProducer, policy retryPolicy) markerProducer {
 	return func(ctx context.Context, ch chan<- *marker.Marker) error {
-		delay := initialDelay
+		delay := policy.InitialDelay
+		failures := 0
 		for {
 			err := producer(ctx, ch)
 			if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -292,17 +341,33 @@ func retryingProducer(producer markerProducer, initialDelay, maxDelay time.Durat
 			if isPermanentError(err) {
 				return err
 			}
+			failures++
+			if policy.MaxFailures > 0 && failures >= policy.MaxFailures {
+				if policy.ErrorWriter != nil {
+					fmt.Fprintf(policy.ErrorWriter, "[tidemark] source error: %v; giving up after %d consecutive failures\n", err, failures)
+				}
+				return err
+			}
+			if policy.ErrorWriter != nil {
+				fmt.Fprintf(policy.ErrorWriter, "[tidemark] source error: %v; retrying in %s\n", err, delay)
+			}
 			if delay <= 0 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+				}
+				delay = backoff.Next(delay, sourceInitialRetryDelay, policy.MaxDelay)
 				continue
 			}
-			timer := time.NewTimer(jitterDelay(delay))
+			timer := time.NewTimer(backoff.WithJitter(delay, rand.Int63n))
 			select {
 			case <-ctx.Done():
 				timer.Stop()
 				return ctx.Err()
 			case <-timer.C:
 			}
-			delay = nextSourceRetryDelay(delay, maxDelay)
+			delay = backoff.Next(delay, sourceInitialRetryDelay, policy.MaxDelay)
 		}
 	}
 }
@@ -316,41 +381,22 @@ func isPermanentError(err error) bool {
 	return errors.As(err, &perr) && perr.Permanent()
 }
 
-func jitterDelay(delay time.Duration) time.Duration {
-	jitter := delay / 2
-	if jitter <= 0 {
-		return delay
-	}
-	return delay + time.Duration(rand.Int63n(int64(jitter)))
-}
-
-func nextSourceRetryDelay(delay, maxDelay time.Duration) time.Duration {
-	if delay <= 0 {
-		return sourceInitialRetryDelay
-	}
-	delay *= 2
-	if maxDelay > 0 && delay > maxDelay {
-		return maxDelay
-	}
-	return delay
-}
-
 func runICY(ctx context.Context, url string, metaInt int, cfg *Config) error {
 	fmt.Fprintf(os.Stderr, "[tidemark] reading ICY stream...\n")
 	reader := icy.NewReader(url, metaInt)
-	return runMarkerSource(ctx, cfg, retryingProducer(reader.Read, sourceInitialRetryDelay, sourceMaxRetryDelay))
+	return runMarkerSource(ctx, cfg, retryingProducerWithPolicy(reader.Read, sourceRetryPolicy(cfg.MaxRetries)))
 }
 
 func runHLS(ctx context.Context, url string, cfg *Config) error {
 	fmt.Fprintf(os.Stderr, "[tidemark] polling HLS manifest...\n")
-	poller := hls.NewPoller(url, hls.WithErrorWriter(os.Stderr))
+	poller := hls.NewPoller(url, hls.WithErrorWriter(os.Stderr), hls.WithMaxConsecutiveFailures(cfg.MaxRetries))
 	return runMarkerSource(ctx, cfg, poller.Poll)
 }
 
 func runMPEGTS(ctx context.Context, url string, cfg *Config) error {
 	fmt.Fprintf(os.Stderr, "[tidemark] reading MPEGTS stream...\n")
 	decoder := mpegts.NewDecoder()
-	return runMarkerSource(ctx, cfg, retryingProducer(func(ctx context.Context, ch chan<- *marker.Marker) error {
+	return runMarkerSource(ctx, cfg, retryingProducerWithPolicy(func(ctx context.Context, ch chan<- *marker.Marker) error {
 		resp, err := detector.HTTPGet(ctx, url)
 		if err != nil {
 			return err
@@ -358,11 +404,20 @@ func runMPEGTS(ctx context.Context, url string, cfg *Config) error {
 		resp.Body = httpclient.WithIdleReadTimeout(resp.Body, httpclient.DefaultIdleReadTimeout)
 		defer resp.Body.Close()
 		return decoder.DecodeReader(ctx, resp.Body, ch)
-	}, sourceInitialRetryDelay, sourceMaxRetryDelay))
+	}, sourceRetryPolicy(cfg.MaxRetries)))
 }
 
 func runUDP(ctx context.Context, url string, cfg *Config) error {
 	fmt.Fprintf(os.Stderr, "[tidemark] reading UDP stream...\n")
 	reader := udp.NewReader(url)
-	return runMarkerSource(ctx, cfg, retryingProducer(reader.Read, sourceInitialRetryDelay, sourceMaxRetryDelay))
+	return runMarkerSource(ctx, cfg, retryingProducerWithPolicy(reader.Read, sourceRetryPolicy(cfg.MaxRetries)))
+}
+
+func sourceRetryPolicy(maxFailures int) retryPolicy {
+	return retryPolicy{
+		InitialDelay: sourceInitialRetryDelay,
+		MaxDelay:     sourceMaxRetryDelay,
+		MaxFailures:  maxFailures,
+		ErrorWriter:  os.Stderr,
+	}
 }

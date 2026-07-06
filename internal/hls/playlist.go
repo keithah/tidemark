@@ -91,6 +91,9 @@ func ParsePlaylist(body string) Playlist {
 	// closes at end of playlist would never emit its AdEnd.
 	if len(pendingTags) > 0 && len(playlist.Segments) > 0 {
 		last := &playlist.Segments[len(playlist.Segments)-1]
+		for _, tag := range pendingTags {
+			tag.Trailing = true
+		}
 		last.Tags = append(last.Tags, pendingTags...)
 	}
 

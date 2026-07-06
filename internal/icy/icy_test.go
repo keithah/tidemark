@@ -114,6 +114,28 @@ func TestReadMultipleTitles(t *testing.T) {
 	}
 }
 
+func TestReadTitleWithApostrophe(t *testing.T) {
+	stream := buildICYStream(16, []string{
+		"StreamTitle='Don't Stop';StreamUrl='';",
+	})
+
+	r := NewReader("http://test", 16)
+	ch := make(chan *marker.Marker, 10)
+	err := r.readStream(context.Background(), bytes.NewReader(stream), ch)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	close(ch)
+
+	m := <-ch
+	if got := m.Fields["StreamTitle"]; got != "Don't Stop" {
+		t.Fatalf("StreamTitle = %q, want %q", got, "Don't Stop")
+	}
+	if got := m.Fields["StreamUrl"]; got != "" {
+		t.Fatalf("StreamUrl = %q, want empty", got)
+	}
+}
+
 func TestReadDuplicateSuppression(t *testing.T) {
 	stream := buildICYStream(16, []string{
 		"StreamTitle='Same';",

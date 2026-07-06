@@ -125,6 +125,19 @@ func TestClassifySCTE35SpliceInsertReturn(t *testing.T) {
 	}
 }
 
+func TestClassifySCTE35SpliceInsertUnknownOON(t *testing.T) {
+	t.Parallel()
+	m := &marker.Marker{
+		Type:   marker.MarkerSCTE35,
+		Fields: map[string]string{"CommandName": "Splice Insert"},
+	}
+	c := New()
+	got := c.Classify(m)
+	if got != marker.Unknown {
+		t.Errorf("expected UNKNOWN for SpliceInsert without OON, got %s", got)
+	}
+}
+
 func TestClassifySCTE35TimeSignal(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -241,6 +254,16 @@ func TestClassifyID3CaseInsensitive(t *testing.T) {
 	got := c.Classify(m)
 	if got != marker.AdStart {
 		t.Errorf("expected AD_START for case insensitive, got %s", got)
+	}
+}
+
+func TestContainsLowerKeywordToken(t *testing.T) {
+	t.Parallel()
+	if !containsLowerKeywordToken("station promo break", adKeywords) {
+		t.Fatal("expected lower-case keyword token match")
+	}
+	if containsLowerKeywordToken("administrator", adKeywords) {
+		t.Fatal("substring should not match without token boundary")
 	}
 }
 

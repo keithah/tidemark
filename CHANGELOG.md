@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-07-06
+
+### Fixed
+
+- Fixed MPEG-TS and UDP decode paths so retained SCTE-35 parser buffers cannot alias reused read buffers across packets.
+- Reset MPEG-TS decoder state after recovered parser failures so retries do not inherit corrupted partial state.
+- Rejected flags placed after the URL, matching Go flag parsing behavior instead of silently ignoring them.
+- Wrote `--json-out` markers before display filtering so the file contains all detected markers as documented.
+- Fixed HLS live dedupe for trailing cue tags and added hysteresis for one-poll stale media-sequence regressions.
+- Failed VOD HLS polling when segment decode errors would otherwise drop markers and exit successfully.
+- Detected encrypted HLS segments and bounded fMP4 init-map reads separately from media segment reads.
+- Fixed MPEG-TS reader leftover handling so carry-over bytes cannot overwrite packets before decode.
+- Classified splice-insert cancel/unknown out-of-network indicators as unknown instead of ad-end.
+- Parsed ICY metadata titles containing apostrophes without swallowing following fields.
+- Bounded in-progress ID3 PES buffering for hostile or malformed ID3-prefixed payloads.
+
+### Changed
+
+- Streamed fMP4 fragment parsing so large `mdat` boxes are skipped instead of buffered in memory.
+- Shared retry backoff logic between CLI sources and HLS polling.
+- Logged transient source retry errors and added a configurable `--max-retries` budget.
+- Reused HTTP idle-timeout timers to reduce per-read allocation churn.
+- Reduced classifier and fMP4 parser allocation overhead.
+- Split large HLS tests into focused planner, retry, and fMP4 coverage.
+
 ## [0.4.1] - 2026-07-05
 
 ### Fixed
@@ -52,6 +77,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - MPEGTS streams read over HTTP (and other network readers) no longer panic with `index out of range` when a read does not land on a 188-byte packet boundary. The decoder now carries the partial tail between reads and only parses whole, sync-aligned TS packets. ([#1](https://github.com/keithah/tidemark/issues/1))
 
+[0.4.2]: https://github.com/keithah/tidemark/releases/tag/v0.4.2
 [0.4.1]: https://github.com/keithah/tidemark/releases/tag/v0.4.1
 [0.4.0]: https://github.com/keithah/tidemark/releases/tag/v0.4.0
 [0.3.2]: https://github.com/keithah/tidemark/releases/tag/v0.3.2

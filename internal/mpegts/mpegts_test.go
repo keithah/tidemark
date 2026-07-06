@@ -43,6 +43,16 @@ func TestDecodeBufEmptySlice(t *testing.T) {
 	}
 }
 
+func TestCloneDecodeDataDoesNotAliasInput(t *testing.T) {
+	input := []byte{0x47, 0x00, 0x00, 0x10}
+	cloned := cloneDecodeData(input)
+	input[0] = 0x00
+
+	if cloned[0] != 0x47 {
+		t.Fatalf("cloned data aliased input; got first byte %#x", cloned[0])
+	}
+}
+
 func TestDecodeBufReportsDecoderPanic(t *testing.T) {
 	d := &Decoder{}
 	markers, err := d.DecodeBuf([]byte{0x47})
@@ -51,6 +61,9 @@ func TestDecodeBufReportsDecoderPanic(t *testing.T) {
 	}
 	if markers != nil {
 		t.Fatalf("markers = %v, want nil on decoder panic", markers)
+	}
+	if d.stream == nil {
+		t.Fatal("decoder stream was not reset after panic")
 	}
 }
 

@@ -15,6 +15,7 @@ type TagResult struct {
 	IsDirect   bool   // true for CUE-OUT/CUE-IN (no cuei decode needed)
 	DirectType marker.Classification
 	Attributes map[string]string // for DATERANGE
+	Trailing   bool              // true when folded from after the last segment
 }
 
 // ParseLine parses a single manifest line for SCTE-35 tags.

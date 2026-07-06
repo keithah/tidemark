@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/keithah/tidemark/internal/backoff"
 	"github.com/keithah/tidemark/internal/httpclient"
 	"github.com/keithah/tidemark/internal/marker"
 	"github.com/keithah/tidemark/internal/pipeline"
@@ -27,6 +28,7 @@ const (
 	defaultSegmentWorkers = 4
 	defaultSeenLimit      = 4096
 	maxRetryDelay         = 30 * time.Second
+	defaultMaxFailures    = 10
 )
 
 // Poller polls an HLS manifest and emits markers for SCTE-35 tags found.
@@ -39,6 +41,7 @@ type Poller struct {
 	planner        playlistPlanner
 	validators     map[string]manifestValidator
 	segmentDecoder *SegmentDecoder
+	maxFailures    int
 }
 
 type manifestValidator struct {
@@ -63,6 +66,43 @@ func (e permanentHTTPStatusError) Error() string {
 	return fmt.Sprintf("permanent HTTP status %d", e.status)
 }
 
+type permanentError interface {
+	Permanent() bool
+}
+
+type permanentPollError struct {
+	err error
+}
+
+func (e permanentPollError) Error() string {
+	return e.err.Error()
+}
+
+func (e permanentPollError) Unwrap() error {
+	return e.err
+}
+
+func (e permanentPollError) Permanent() bool {
+	return true
+}
+
+type retryBudgetError struct {
+	failures int
+	err      error
+}
+
+func (e retryBudgetError) Error() string {
+	return fmt.Sprintf("giving up after %d consecutive failures: %v", e.failures, e.err)
+}
+
+func (e retryBudgetError) Unwrap() error {
+	return e.err
+}
+
+func (e retryBudgetError) Permanent() bool {
+	return true
+}
+
 // Option configures a Poller.
 type Option func(*Poller)
 
@@ -71,6 +111,16 @@ func WithErrorWriter(w io.Writer) Option {
 	return func(p *Poller) {
 		if w != nil {
 			p.errors = w
+		}
+	}
+}
+
+// WithMaxConsecutiveFailures bounds transient manifest failures before Poll returns.
+// A value of 0 disables the budget and retries until context cancellation.
+func WithMaxConsecutiveFailures(max int) Option {
+	return func(p *Poller) {
+		if max >= 0 {
+			p.maxFailures = max
 		}
 	}
 }
@@ -88,6 +138,7 @@ func NewPoller(url string, opts ...Option) *Poller {
 		planner:        newPlaylistPlanner(defaultSeenLimit),
 		validators:     make(map[string]manifestValidator),
 		segmentDecoder: newSegmentDecoderWithClient(client),
+		maxFailures:    defaultMaxFailures,
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -95,10 +146,20 @@ func NewPoller(url string, opts ...Option) *Poller {
 	return p
 }
 
+func isPermanentPollError(err error) bool {
+	var httpErr permanentHTTPStatusError
+	if errors.As(err, &httpErr) {
+		return true
+	}
+	var perr permanentError
+	return errors.As(err, &perr) && perr.Permanent()
+}
+
 // Poll polls the HLS manifest and emits markers on the channel.
 // It blocks until the context is cancelled or the stream ends (VOD with ENDLIST).
 func (p *Poller) Poll(ctx context.Context, ch chan<- *marker.Marker) error {
 	retryDelay := p.pollInterval
+	failures := 0
 
 	// Check if this is a master playlist and resolve to media playlist. Retry
 	// transient failures with backoff, matching the polling loop below, so a
@@ -115,17 +176,21 @@ func (p *Poller) Poll(ctx context.Context, ch chan<- *marker.Marker) error {
 		if err == nil {
 			break
 		}
-		var permanent permanentHTTPStatusError
-		if errors.As(err, &permanent) {
+		if isPermanentPollError(err) {
 			return err
+		}
+		failures++
+		if budgetErr := p.retryBudgetError(failures, err); budgetErr != nil {
+			return budgetErr
 		}
 		p.reportf("resolve manifest: %v", err)
 		if waitErr := waitWithJitter(ctx, retryDelay); waitErr != nil {
 			return waitErr
 		}
-		retryDelay = nextRetryDelay(retryDelay)
+		retryDelay = backoff.Next(retryDelay, defaultPollInterval, maxRetryDelay)
 	}
 	retryDelay = p.pollInterval
+	failures = 0
 	manifestURL := resolved.url
 	initialBody := resolved.body
 	hasInitialBody := resolved.hasBody
@@ -148,18 +213,22 @@ func (p *Poller) Poll(ctx context.Context, ch chan<- *marker.Marker) error {
 			endlist, waitInterval, err = p.fetchAndProcess(ctx, manifestURL, ch)
 		}
 		if err != nil {
-			var permanent permanentHTTPStatusError
-			if errors.As(err, &permanent) {
+			if isPermanentPollError(err) {
 				return err
+			}
+			failures++
+			if budgetErr := p.retryBudgetError(failures, err); budgetErr != nil {
+				return budgetErr
 			}
 			p.reportf("fetch manifest: %v", err)
 			if waitErr := waitWithJitter(ctx, retryDelay); waitErr != nil {
 				return waitErr
 			}
-			retryDelay = nextRetryDelay(retryDelay)
+			retryDelay = backoff.Next(retryDelay, defaultPollInterval, maxRetryDelay)
 			continue
 		}
 		retryDelay = p.pollInterval
+		failures = 0
 
 		if endlist {
 			return nil // VOD complete
@@ -169,6 +238,13 @@ func (p *Poller) Poll(ctx context.Context, ch chan<- *marker.Marker) error {
 			return err
 		}
 	}
+}
+
+func (p *Poller) retryBudgetError(failures int, err error) error {
+	if p.maxFailures <= 0 || failures < p.maxFailures {
+		return nil
+	}
+	return retryBudgetError{failures: failures, err: err}
 }
 
 func (p *Poller) resolveInitialManifest(ctx context.Context, manifestURL string) (resolvedManifest, error) {
@@ -235,6 +311,9 @@ func (p *Poller) processManifest(ctx context.Context, manifestURL, body string, 
 				delete(decoded, plan.url)
 				if result.err != nil {
 					p.reportf("decode segment %s: %v", result.url, result.err)
+					if playlist.Endlist {
+						return permanentPollError{err: fmt.Errorf("decode segment %s: %w", result.url, result.err)}
+					}
 				} else {
 					for _, m := range result.markers {
 						if err := pipeline.SendMarker(ctx, ch, m); err != nil {
@@ -460,20 +539,5 @@ func waitWithJitter(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		d = defaultPollInterval
 	}
-	jitterMax := d / 2
-	if jitterMax > 0 {
-		d += time.Duration(rand.Int63n(int64(jitterMax)))
-	}
-	return wait(ctx, d)
-}
-
-func nextRetryDelay(d time.Duration) time.Duration {
-	if d <= 0 {
-		return defaultPollInterval
-	}
-	d *= 2
-	if d > maxRetryDelay {
-		return maxRetryDelay
-	}
-	return d
+	return wait(ctx, backoff.WithJitter(d, rand.Int63n))
 }

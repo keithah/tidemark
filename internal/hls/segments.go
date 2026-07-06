@@ -20,6 +20,10 @@ import (
 // MaxSegmentBytes caps buffered HLS segment data used for combined MPEG-TS and ID3 parsing.
 const MaxSegmentBytes = 32 << 20
 
+// MaxInitSegmentBytes caps fMP4 init-map downloads. Init segments should only
+// contain metadata boxes, not media payloads.
+const MaxInitSegmentBytes = 2 << 20
+
 // maxInitCacheEntries bounds the fMP4 init-segment cache so a long-running
 // stream that rotates its EXT-X-MAP URI (SSAI, discontinuities) cannot grow
 // memory without limit.
@@ -72,11 +76,12 @@ func (d *SegmentDecoder) Decode(ctx context.Context, segURL, mapURL string, seg 
 	defer cancel()
 
 	if mapURL != "" {
-		segmentData, err := d.fetchBytes(dlCtx, segURL)
+		resp, err := d.fetchResponse(dlCtx, segURL)
 		if err != nil {
 			return err
 		}
-		return d.decodeFMP4(ctx, mapURL, segmentData, seg, emit)
+		defer func() { _ = resp.Body.Close() }()
+		return d.decodeFMP4(ctx, mapURL, resp.Body, seg, emit)
 	}
 
 	result, decodeErr := d.decodeMPEGTS(dlCtx, segURL)
@@ -154,29 +159,29 @@ func (d *SegmentDecoder) fetchResponse(ctx context.Context, url string) (*http.R
 	return resp, nil
 }
 
-func (d *SegmentDecoder) fetchBytes(ctx context.Context, url string) ([]byte, error) {
+func (d *SegmentDecoder) fetchBytes(ctx context.Context, url string, maxBytes int, label string) ([]byte, error) {
 	resp, err := d.fetchResponse(ctx, url)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxSegmentBytes+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
 	if err != nil {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
-	if len(data) > MaxSegmentBytes {
-		return nil, fmt.Errorf("segment too large: exceeds %d bytes", MaxSegmentBytes)
+	if len(data) > maxBytes {
+		return nil, fmt.Errorf("%s too large: exceeds %d bytes", label, maxBytes)
 	}
 	return data, nil
 }
 
-func (d *SegmentDecoder) decodeFMP4(ctx context.Context, mapURL string, segmentData []byte, seg int, emit func(*marker.Marker) error) error {
+func (d *SegmentDecoder) decodeFMP4(ctx context.Context, mapURL string, segment io.Reader, seg int, emit func(*marker.Marker) error) error {
 	init, err := d.initInfo(ctx, mapURL)
 	if err != nil {
 		return err
 	}
-	timing, err := fmp4.ParseFragment(init, segmentData)
+	timing, err := fmp4.ParseFragmentReader(init, segment, MaxSegmentBytes)
 	if err != nil {
 		return fmt.Errorf("parse fmp4 fragment: %w", err)
 	}
@@ -300,7 +305,7 @@ func (d *SegmentDecoder) initInfo(ctx context.Context, mapURL string) (fmp4.Init
 	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	data, err := d.fetchBytes(fetchCtx, mapURL)
+	data, err := d.fetchBytes(fetchCtx, mapURL, MaxInitSegmentBytes, "fmp4 init")
 	if err != nil {
 		fetch.err = fmt.Errorf("fetch fmp4 init: %w", err)
 		return fmp4.InitInfo{}, fetch.err

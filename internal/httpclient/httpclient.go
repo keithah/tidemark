@@ -76,22 +76,23 @@ func WithIdleReadTimeout(body io.ReadCloser, timeout time.Duration) io.ReadClose
 		return body
 	}
 	w := &idleReadCloser{
-		body:    body,
-		timeout: timeout,
+		body:     body,
+		timeout:  timeout,
+		deadline: time.Now().Add(timeout),
 	}
-	w.scheduleTimerLocked()
+	w.timer = time.AfterFunc(timeout, w.timeoutBody)
 	return w
 }
 
 type idleReadCloser struct {
-	body    io.ReadCloser
-	timeout time.Duration
-	timer   *time.Timer
+	body     io.ReadCloser
+	timeout  time.Duration
+	timer    *time.Timer
+	deadline time.Time
 
 	mu       sync.Mutex
 	closed   bool
 	timedOut bool
-	timerSeq int
 }
 
 func (r *idleReadCloser) Read(p []byte) (int, error) {
@@ -119,9 +120,9 @@ func (r *idleReadCloser) Close() error {
 	return r.body.Close()
 }
 
-func (r *idleReadCloser) timeoutBody(seq int) {
+func (r *idleReadCloser) timeoutBody() {
 	r.mu.Lock()
-	if r.closed || seq != r.timerSeq {
+	if r.closed || time.Now().Before(r.deadline) {
 		r.mu.Unlock()
 		return
 	}
@@ -136,19 +137,11 @@ func (r *idleReadCloser) resetTimer() {
 		r.mu.Unlock()
 		return
 	}
+	r.deadline = time.Now().Add(r.timeout)
 	if r.timer != nil {
-		r.timer.Stop()
+		r.timer.Reset(r.timeout)
 	}
-	r.scheduleTimerLocked()
 	r.mu.Unlock()
-}
-
-func (r *idleReadCloser) scheduleTimerLocked() {
-	r.timerSeq++
-	seq := r.timerSeq
-	r.timer = time.AfterFunc(r.timeout, func() {
-		r.timeoutBody(seq)
-	})
 }
 
 func (r *idleReadCloser) isTimedOut() bool {

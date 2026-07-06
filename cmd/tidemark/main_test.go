@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -43,6 +44,16 @@ func TestParseFlags_FilterValid(t *testing.T) {
 	}
 }
 
+func TestParseFlags_RejectsFlagsAfterURL(t *testing.T) {
+	_, _, _, _, err := parseFlags([]string{"http://example.com/stream", "--json", "--timeout", "30"})
+	if err == nil {
+		t.Fatal("expected error for flags after URL")
+	}
+	if !strings.Contains(err.Error(), "flags must appear before URL") {
+		t.Fatalf("error = %q, want flags ordering message", err.Error())
+	}
+}
+
 func TestParseFlags_VersionIsPureConfig(t *testing.T) {
 	cfg, url, _, cancel, err := parseFlags([]string{"--version"})
 	defer cancel()
@@ -68,6 +79,36 @@ func TestRunMarkerSourcePropagatesProducerError(t *testing.T) {
 	})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("runMarkerSource error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestRunMarkerSourceJSONOutIncludesFilteredMarkers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "markers.ndjson")
+	cfg := &Config{
+		JSONOut:    path,
+		Filter:     "icy",
+		FilterType: marker.MarkerICY,
+		HasFilter:  true,
+	}
+
+	err := runMarkerSource(context.Background(), cfg, func(ctx context.Context, ch chan<- *marker.Marker) error {
+		ch <- &marker.Marker{
+			Type:   marker.MarkerID3,
+			Source: "test",
+			Tags:   map[string]string{"TIT2": "filtered but recorded"},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runMarkerSource error: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read json-out: %v", err)
+	}
+	if !bytes.Contains(data, []byte("filtered but recorded")) {
+		t.Fatalf("json-out = %q, want filtered marker", string(data))
 	}
 }
 
@@ -99,6 +140,69 @@ func TestRetryingProducerRetriesErrorThenStopsOnSuccess(t *testing.T) {
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestRetryingProducerLogsTransientError(t *testing.T) {
+	attempts := 0
+	var log bytes.Buffer
+	producer := retryingProducerWithErrorWriter(func(ctx context.Context, ch chan<- *marker.Marker) error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("temporary source failure")
+		}
+		return nil
+	}, 0, 0, &log)
+
+	if err := producer(context.Background(), make(chan *marker.Marker, 1)); err != nil {
+		t.Fatalf("retrying producer error = %v, want nil", err)
+	}
+	if !strings.Contains(log.String(), "temporary source failure") {
+		t.Fatalf("retry log = %q, want transient error", log.String())
+	}
+}
+
+func TestRetryingProducerZeroDelayStillObservesContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	attempts := 0
+	producer := retryingProducerWithErrorWriter(func(ctx context.Context, ch chan<- *marker.Marker) error {
+		attempts++
+		cancel()
+		return errors.New("temporary source failure")
+	}, 0, 0, io.Discard)
+
+	err := producer(ctx, make(chan *marker.Marker, 1))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("retrying producer error = %v, want context.Canceled", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestRetryingProducerStopsAfterMaxFailures(t *testing.T) {
+	wantErr := errors.New("temporary source failure")
+	attempts := 0
+	var log bytes.Buffer
+	producer := retryingProducerWithPolicy(func(ctx context.Context, ch chan<- *marker.Marker) error {
+		attempts++
+		return wantErr
+	}, retryPolicy{
+		InitialDelay: 0,
+		MaxDelay:     0,
+		MaxFailures:  3,
+		ErrorWriter:  &log,
+	})
+
+	err := producer(context.Background(), make(chan *marker.Marker, 1))
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("retrying producer error = %v, want %v", err, wantErr)
+	}
+	if attempts != 3 {
+		t.Fatalf("attempts = %d, want 3", attempts)
+	}
+	if !strings.Contains(log.String(), "giving up after 3 consecutive failures") {
+		t.Fatalf("retry log = %q, want giving up message", log.String())
 	}
 }
 
@@ -170,6 +274,37 @@ func TestParseFlags_TimeoutSetsValue(t *testing.T) {
 	}
 	if cfg.Timeout != 30 {
 		t.Errorf("Timeout = %d, want 30", cfg.Timeout)
+	}
+}
+
+func TestParseFlags_MaxRetriesSetsValue(t *testing.T) {
+	cfg, _, _, cancel, err := parseFlags([]string{"--max-retries", "3", "http://example.com"})
+	defer cancel()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.MaxRetries != 3 {
+		t.Errorf("MaxRetries = %d, want 3", cfg.MaxRetries)
+	}
+}
+
+func TestParseFlags_RejectsNegativeMaxRetries(t *testing.T) {
+	_, _, _, _, err := parseFlags([]string{"--max-retries", "-1", "http://example.com"})
+	if err == nil {
+		t.Fatal("expected error for negative max retries")
+	}
+	if !strings.Contains(err.Error(), "--max-retries must be >= 0") {
+		t.Fatalf("error = %q, want negative max retries message", err.Error())
+	}
+}
+
+func TestParseFlags_RejectsNegativeTimeout(t *testing.T) {
+	_, _, _, _, err := parseFlags([]string{"--timeout", "-1", "http://example.com"})
+	if err == nil {
+		t.Fatal("expected error for negative timeout")
+	}
+	if !strings.Contains(err.Error(), "--timeout must be >= 0") {
+		t.Fatalf("error = %q, want negative timeout message", err.Error())
 	}
 }
 

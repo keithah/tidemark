@@ -131,7 +131,10 @@ func parseSegmentationType(value string) (int, bool) {
 func classifySCTE35Rule(rule scte35Rule) marker.Classification {
 	switch rule.commandName {
 	case "Splice Insert":
-		if rule.outOfNetworkKnown && rule.outOfNetwork {
+		if !rule.outOfNetworkKnown {
+			return marker.Unknown
+		}
+		if rule.outOfNetwork {
 			return marker.AdStart
 		}
 		return marker.AdEnd
@@ -170,7 +173,7 @@ func classifyID3(m *marker.Marker) marker.Classification {
 				sawEnd = true
 			}
 		}
-		if containsKeywordToken(lower, adKeywords) {
+		if containsLowerKeywordToken(lower, adKeywords) {
 			sawStart = true
 		}
 	}
@@ -207,6 +210,29 @@ func containsKeywordToken(text string, keywords map[string]struct{}) bool {
 		return false
 	}
 	_, ok := keywords[strings.ToLower(text[start:])]
+	return ok
+}
+
+func containsLowerKeywordToken(text string, keywords map[string]struct{}) bool {
+	start := -1
+	for i, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 {
+			if _, ok := keywords[text[start:i]]; ok {
+				return true
+			}
+			start = -1
+		}
+	}
+	if start < 0 {
+		return false
+	}
+	_, ok := keywords[text[start:]]
 	return ok
 }
 

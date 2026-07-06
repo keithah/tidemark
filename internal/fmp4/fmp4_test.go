@@ -1,7 +1,9 @@
 package fmp4
 
 import (
+	"bytes"
 	"encoding/binary"
+	"io"
 	"testing"
 )
 
@@ -119,6 +121,72 @@ func TestParseFragmentExtractsVersionOneEventMessage(t *testing.T) {
 	if string(event.MessageData) != "payload" {
 		t.Fatalf("message data = %q, want payload", string(event.MessageData))
 	}
+}
+
+func TestParseFragmentReaderSkipsLargeUnneededBox(t *testing.T) {
+	init := InitInfo{Tracks: map[uint32]TrackInfo{
+		7: {ID: 7, Timescale: 48000, Handler: "soun"},
+	}}
+	fragment := append(
+		box("moof",
+			box("traf",
+				box("tfhd", full(0, u32(7))),
+				box("tfdt", full(0x01000000, u64(96000))),
+				box("trun", full(0x000100, u32(1), u32(1024))),
+			),
+		),
+		box("mdat", bytes.Repeat([]byte{0xff}, 1<<20))...,
+	)
+
+	timing, err := ParseFragmentReader(init, bytes.NewReader(fragment), len(fragment))
+	if err != nil {
+		t.Fatalf("ParseFragmentReader error = %v", err)
+	}
+	if len(timing.Samples) != 1 {
+		t.Fatalf("samples = %d, want 1", len(timing.Samples))
+	}
+	if timing.Samples[0].DecodeTime != 96000 {
+		t.Fatalf("decode time = %d, want 96000", timing.Samples[0].DecodeTime)
+	}
+}
+
+func TestParseFragmentReaderRejectsOversizedFragment(t *testing.T) {
+	_, err := ParseFragmentReader(InitInfo{}, bytes.NewReader(box("free", []byte("toolarge"))), 8)
+	if err == nil {
+		t.Fatal("expected oversized fragment error")
+	}
+}
+
+func TestParseFragmentReaderPropagatesReadErrors(t *testing.T) {
+	_, err := ParseFragmentReader(InitInfo{}, &partialErrReader{}, 1024)
+	if err == nil {
+		t.Fatal("expected read error")
+	}
+}
+
+func TestWalkBoxesStopsWhenCallbackReturnsFalse(t *testing.T) {
+	data := append(box("ftyp", []byte("isom")), box("moov")...)
+	visited := 0
+	walkBoxes(data, func(box boxHeader) bool {
+		visited++
+		return false
+	})
+	if visited != 1 {
+		t.Fatalf("visited boxes = %d, want 1", visited)
+	}
+}
+
+type partialErrReader struct {
+	done bool
+}
+
+func (r *partialErrReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.ErrUnexpectedEOF
+	}
+	r.done = true
+	copy(p, []byte{0, 0, 0, 8})
+	return 4, nil
 }
 
 func box(kind string, payload ...[]byte) []byte {
